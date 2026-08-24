@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import timm
 import torch
 from torch import Tensor, nn
 
-from .data import artifact_channels
+from .forensic import ProjectedForensicEncoder
 from .lsda import LatentSpaceAugmenter, ResidualLatentAdapter
 
 
@@ -209,31 +209,6 @@ class LocalInjector(nn.Module):
         return query + self.scale * self.output_norm(adapted)
 
 
-class ArtifactCNN(nn.Module):
-    """Independent encoder for RGB-plus-artifact CNN inputs."""
-
-    def __init__(self, in_channels: int, feature_dim: int) -> None:
-        super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-        )
-        self.blocks = nn.Sequential(
-            nn.Conv2d(64, 128, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.GELU(),
-        )
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.project = nn.Linear(256, feature_dim)
-
-    def forward(self, images: Tensor) -> Tensor:
-        return self.project(self.pool(self.blocks(self.stem(images))).flatten(1))
-
-
 class ForgeryAwareLSDAViT(nn.Module):
     """FA-ViT student with LSDA domain teachers and latent augmentation."""
 
@@ -265,24 +240,27 @@ class ForgeryAwareLSDAViT(nn.Module):
         feature_dropout: float = 0.0,
         unfreeze_last_blocks: int = 0,
         domain_adversarial_strength: float = 1.0,
-        artifact_mode: str = "rgb",
-        cnn_in_channels: int = 3,
+        enable_srm_branch: bool = False,
+        enable_fft_branch: bool = False,
+        srm_backbone: str = "xception",
+        fft_backbone: str = "mobilenetv3_small_100",
+        forensic_pretrained: bool = True,
     ) -> None:
         super().__init__()
         if not hasattr(backbone, "blocks") or not hasattr(backbone, "patch_embed"):
             raise TypeError("backbone must be a timm VisionTransformer")
         if len(forgery_methods) < 2 or len(set(forgery_methods)) != len(forgery_methods):
             raise ValueError("forgery_methods must contain at least two unique domains")
-        expected_cnn_channels = artifact_channels(artifact_mode)
-        if cnn_in_channels != expected_cnn_channels:
-            raise ValueError(
-                "artifact mode/channel mismatch: "
-                f"mode={artifact_mode!r} expects {expected_cnn_channels}, got {cnn_in_channels}"
-            )
         self.backbone = backbone
-        self.artifact_mode = artifact_mode
-        self.cnn_in_channels = cnn_in_channels
         self.embed_dim = int(backbone.embed_dim)
+        self.enabled_branches = (
+            "rgb",
+            *(("srm",) if enable_srm_branch else ()),
+            *(("fft",) if enable_fft_branch else ()),
+        )
+        self.srm_backbone_name = srm_backbone if enable_srm_branch else None
+        self.fft_backbone_name = fft_backbone if enable_fft_branch else None
+        self.fusion_name = "fixed_slot_concat"
         self.forgery_methods = tuple(forgery_methods)
         self.num_domains = len(self.forgery_methods) + 1
         self.inject_layers = tuple(int(index) for index in inject_layers)
@@ -336,9 +314,22 @@ class ForgeryAwareLSDAViT(nn.Module):
             nn.GELU(),
             nn.Dropout(feature_dropout),
         )
-        self.artifact_cnn = ArtifactCNN(cnn_in_channels, self.embed_dim)
+        self.srm_encoder = (
+            ProjectedForensicEncoder(
+                srm_backbone, self.embed_dim, forensic_pretrained, feature_dropout
+            )
+            if enable_srm_branch
+            else None
+        )
+        self.fft_encoder = (
+            ProjectedForensicEncoder(
+                fft_backbone, self.embed_dim, forensic_pretrained, feature_dropout
+            )
+            if enable_fft_branch
+            else None
+        )
         self.late_fusion = nn.Sequential(
-            nn.Linear(self.embed_dim * 2, self.embed_dim),
+            nn.Linear(self.embed_dim * 3, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
             nn.GELU(),
             nn.Dropout(feature_dropout),
@@ -390,7 +381,7 @@ class ForgeryAwareLSDAViT(nn.Module):
             self.fake_teachers,
             self.latent_augmenter,
             self.vit_feature_fusion,
-            self.artifact_cnn,
+            *(module for module in (self.srm_encoder, self.fft_encoder) if module is not None),
             self.late_fusion,
             self.head,
             self.domain_classifier,
@@ -437,78 +428,101 @@ class ForgeryAwareLSDAViT(nn.Module):
         vit_features = self.vit_feature_fusion(torch.cat((cls_features, pooled), dim=1))
         return vit_features, student_maps
 
-    def _fused_features(
-        self, cls_features: Tensor, patch_maps: Tensor, cnn_images: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        if cnn_images.ndim != 4:
-            raise ValueError("cnn_images must be [B, C, H, W]")
-        if cnn_images.shape[0] != cls_features.shape[0]:
-            raise ValueError("RGB and CNN inputs must have matching batch sizes")
-        if cnn_images.shape[1] != self.cnn_in_channels:
+    def _validate_inputs(
+        self, inputs: Mapping[str, Tensor], grouped: bool
+    ) -> None:
+        if not isinstance(inputs, Mapping):
+            raise TypeError("inputs must be a mapping of branch names to tensors")
+        if set(inputs) != set(self.enabled_branches):
             raise ValueError(
-                f"artifact mode {self.artifact_mode!r} expects CNN width "
-                f"{self.cnn_in_channels}, got {cnn_images.shape[1]}"
+                "inputs must contain exactly enabled branches "
+                f"{self.enabled_branches}, got {tuple(inputs)}"
             )
+        expected_rank = 5 if grouped else 4
+        reference = inputs["rgb"]
+        if reference.ndim != expected_rank:
+            raise ValueError(
+                f"branch inputs must be rank {expected_rank} tensors, "
+                f"got rgb rank {reference.ndim}"
+            )
+        if reference.shape[-(expected_rank - 1)] != 3:
+            raise ValueError("every branch input must have exactly three channels")
+        if not reference.is_floating_point() or not torch.isfinite(reference).all():
+            raise ValueError("every branch input must be finite floating point")
+        reference_geometry = reference.shape[:2] + reference.shape[-2:]
+        if grouped and reference.shape[1] != self.num_domains:
+            raise ValueError(
+                f"rgb grouped input must have {self.num_domains} domains, "
+                f"got {reference.shape[1]}"
+            )
+        for name in self.enabled_branches:
+            value = inputs[name]
+            if value.ndim != expected_rank:
+                raise ValueError(
+                    f"branch {name!r} must be rank {expected_rank}, got {value.ndim}"
+                )
+            if value.shape[-(expected_rank - 1)] != 3:
+                raise ValueError(
+                    f"branch {name!r} must have exactly three channels, "
+                    f"got {value.shape[-(expected_rank - 1)]}"
+                )
+            if not value.is_floating_point() or not torch.isfinite(value).all():
+                raise ValueError(
+                    f"branch {name!r} must be finite floating point"
+                )
+            geometry = value.shape[:2] + value.shape[-2:]
+            if geometry != reference_geometry:
+                raise ValueError(
+                    "branch inputs must have matching group/domain/spatial geometry"
+                )
+
+    def _fused_features(
+        self,
+        cls_features: Tensor,
+        patch_maps: Tensor,
+        flat_inputs: Mapping[str, Tensor],
+    ) -> tuple[Tensor, Tensor, Tensor]:
         vit_features, student_maps = self._student_features(cls_features, patch_maps)
-        cnn_features = self.artifact_cnn(cnn_images)
+        zero = torch.zeros_like(vit_features)
+        srm_features = self.srm_encoder(flat_inputs["srm"]) if self.srm_encoder else zero
+        fft_features = self.fft_encoder(flat_inputs["fft"]) if self.fft_encoder else zero
         return (
-            self.late_fusion(torch.cat((vit_features, cnn_features), dim=1)),
+            self.late_fusion(
+                torch.cat((vit_features, srm_features, fft_features), dim=1)
+            ),
             vit_features,
             student_maps,
         )
 
-    def forward_features(self, images: Tensor, cnn_images: Tensor) -> Tensor:
-        if images.ndim != 4 or images.shape[1] != 3:
-            raise ValueError("images must be [B, 3, H, W]")
-        if cnn_images.ndim != 4 or images.shape[0] != cnn_images.shape[0]:
-            raise ValueError("RGB and CNN inputs must be rank-4 with matching batches")
-        if images.shape[-2:] != cnn_images.shape[-2:]:
-            raise ValueError("RGB and CNN inputs must have matching spatial dimensions")
+    def forward_features(self, inputs: Mapping[str, Tensor]) -> Tensor:
+        self._validate_inputs(inputs, grouped=False)
+        images = inputs["rgb"]
         cls_features, patch_maps = self.encode_latents(images)
-        features, _, _ = self._fused_features(cls_features, patch_maps, cnn_images)
+        features, _, _ = self._fused_features(cls_features, patch_maps, inputs)
         return features
 
     def forward(
-        self, images: Tensor, cnn_images: Tensor, return_features: bool = False
+        self, inputs: Mapping[str, Tensor], return_features: bool = False
     ) -> Tensor | tuple[Tensor, Tensor]:
-        features = self.forward_features(images, cnn_images)
+        features = self.forward_features(inputs)
         logits = self.head(features)
         return (logits, features) if return_features else logits
 
     def forward_group(
-        self, grouped_images: Tensor, grouped_cnn_images: Tensor
+        self, grouped_inputs: Mapping[str, Tensor]
     ) -> dict[str, Tensor]:
-        if grouped_images.ndim != 5 or grouped_images.shape[1] != self.num_domains:
-            raise ValueError(
-                f"grouped_images must be [G, {self.num_domains}, 3, H, W]"
-            )
-        if grouped_images.shape[2] != 3:
-            raise ValueError(
-                f"grouped_images must be [G, {self.num_domains}, 3, H, W]; "
-                f"got {grouped_images.shape[2]} channels"
-            )
-        if grouped_cnn_images.ndim != 5:
-            raise ValueError("grouped_cnn_images must be [G, D, C, H, W]")
-        if (
-            grouped_cnn_images.shape[:2] != grouped_images.shape[:2]
-            or grouped_cnn_images.shape[-2:] != grouped_images.shape[-2:]
-        ):
-            raise ValueError("grouped RGB and CNN inputs must have matching group geometry")
-        if grouped_cnn_images.shape[2] != self.cnn_in_channels:
-            raise ValueError(
-                f"artifact mode {self.artifact_mode!r} expects CNN width "
-                f"{self.cnn_in_channels}, got {grouped_cnn_images.shape[2]}"
-            )
+        self._validate_inputs(grouped_inputs, grouped=True)
+        grouped_images = grouped_inputs["rgb"]
         groups, domains, channels, height, width = grouped_images.shape
+        flat_inputs = {
+            name: value.reshape(groups * domains, channels, height, width)
+            for name, value in grouped_inputs.items()
+        }
         cls, patch_maps = self.encode_latents(
             grouped_images.reshape(groups * domains, channels, height, width)
         )
         features, vit_features, student_maps = self._fused_features(
-            cls,
-            patch_maps,
-            grouped_cnn_images.reshape(
-                groups * domains, self.cnn_in_channels, height, width
-            ),
+            cls, patch_maps, flat_inputs
         )
         grid_h, grid_w = student_maps.shape[-2:]
         features = features.reshape(groups, domains, self.embed_dim)
@@ -581,8 +595,11 @@ def create_favit_lsda(
     feature_dropout: float = 0.0,
     unfreeze_last_blocks: int = 0,
     domain_adversarial_strength: float = 1.0,
-    artifact_mode: str = "rgb",
-    cnn_in_channels: int = 3,
+    enable_srm_branch: bool = False,
+    enable_fft_branch: bool = False,
+    srm_backbone: str = "xception",
+    fft_backbone: str = "mobilenetv3_small_100",
+    forensic_pretrained: bool = True,
 ) -> ForgeryAwareLSDAViT:
     backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
     return ForgeryAwareLSDAViT(
@@ -601,6 +618,9 @@ def create_favit_lsda(
         feature_dropout=feature_dropout,
         unfreeze_last_blocks=unfreeze_last_blocks,
         domain_adversarial_strength=domain_adversarial_strength,
-        artifact_mode=artifact_mode,
-        cnn_in_channels=cnn_in_channels,
+        enable_srm_branch=enable_srm_branch,
+        enable_fft_branch=enable_fft_branch,
+        srm_backbone=srm_backbone,
+        fft_backbone=fft_backbone,
+        forensic_pretrained=forensic_pretrained,
     )
