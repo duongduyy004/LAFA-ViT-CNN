@@ -66,19 +66,20 @@ def main() -> None:
             args.level,
         ]
         print("$", " ".join(cmd))
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        # stderr inherited (not captured) so tqdm's progress bar renders live;
+        # only stdout (the final JSON blob) is piped back for saving.
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
         print(proc.stdout)
         if proc.returncode != 0:
-            print(proc.stderr, file=sys.stderr)
             failures.append(name)
             result_file.write_text(
-                json.dumps({"case": name, "error": proc.stderr}, indent=2),
+                json.dumps({"case": name, "error": "non-zero exit code"}, indent=2),
                 encoding="utf-8",
             )
             continue
 
-        # evaluate_ffpp.py prints a JSON blob (plus tqdm noise on stderr); take
-        # the last top-level JSON object from stdout.
+        # evaluate_ffpp.py prints a JSON blob to stdout; take the last
+        # top-level JSON object in case of extra prints.
         stdout = proc.stdout.strip()
         json_start = stdout.rfind("\n{")
         json_text = stdout[json_start + 1 :] if json_start != -1 else stdout
