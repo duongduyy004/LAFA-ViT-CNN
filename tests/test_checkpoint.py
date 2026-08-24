@@ -404,6 +404,60 @@ def test_train_resume_rejects_checkpoint_before_builders_or_output_side_effects(
     assert not (tmp_path / "out").exists()
 
 
+def test_train_resume_releases_deserialized_checkpoint_before_epoch_loop(
+    tmp_path, monkeypatch
+):
+    """Catches CPU optimizer state remaining live through the training loop."""
+    import gc
+    import weakref
+
+    config_path, config = _write_train_fixture(tmp_path)
+    model = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
+    optimizer = train.build_optimizer(model, config["train"])
+    scheduler = train.build_scheduler(optimizer, config["train"])
+    resume_path = tmp_path / "resume.pt"
+    torch.save(
+        {
+            **_tiny_checkpoint(TINY_MODEL_CONFIG, model.state_dict()),
+            "epoch": 0,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": None,
+            "random_state": None,
+        },
+        resume_path,
+    )
+
+    class WeakCheckpoint(dict):
+        __slots__ = ("__weakref__",)
+
+    real_torch_load = train.torch.load
+    checkpoint_ref = None
+
+    def tracked_load(path, **kwargs):
+        nonlocal checkpoint_ref
+        checkpoint = WeakCheckpoint(real_torch_load(path, **kwargs))
+        checkpoint_ref = weakref.ref(checkpoint)
+        return checkpoint
+
+    def observe_release(*args, **_kwargs):
+        gc.collect()
+        assert checkpoint_ref is not None
+        assert checkpoint_ref() is None
+        args[2].step()
+        return {}
+
+    monkeypatch.setattr(train.torch, "load", tracked_load)
+    monkeypatch.setattr(train, "train_one_epoch", observe_release)
+    monkeypatch.setattr(train, "evaluate_at_level", lambda *_args, **_kwargs: {"auc": 0.5})
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train.py", "--config", config_path, "--resume", str(resume_path)],
+    )
+
+    train.main()
+
+
 def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata(
     tmp_path, monkeypatch
 ):

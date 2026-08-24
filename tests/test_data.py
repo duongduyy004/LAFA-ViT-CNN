@@ -1,5 +1,6 @@
 import csv
 import random
+import re
 
 import pytest
 import torch
@@ -172,6 +173,32 @@ def test_dataset_rejects_custom_transform_without_explicit_contract(tmp_path):
     manifest = _write_frame_manifest(tmp_path)
     with pytest.raises(ValueError, match=r"transform.*expected_branches"):
         FrameFaceDataset(manifest, tmp_path, UndeclaredTransform())
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        ("srm",),
+        ("fft",),
+        ("srm", "fft"),
+    ],
+)
+def test_dataset_transform_contract_requires_rgb_first(tmp_path, branches):
+    class MissingRgbTransform(_ExplicitTransform):
+        expected_branches = branches
+
+    manifest = _write_frame_manifest(tmp_path)
+    with pytest.raises(
+        ValueError,
+        match=rf"expected_branches.*begin with 'rgb'.*got {re.escape(repr(branches))}",
+    ):
+        FrameFaceDataset(
+            manifest,
+            tmp_path,
+            MissingRgbTransform(
+                {name: torch.zeros(3, 32, 32) for name in branches}
+            ),
+        )
 
 
 def test_frame_dataset_accepts_custom_transform_with_explicit_contract(tmp_path):

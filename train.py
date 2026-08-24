@@ -341,6 +341,8 @@ def main() -> None:
             checkpoint.get("epochs_without_improvement", 0)
         )
         restore_random_state(checkpoint.get("random_state"))
+        resume_checkpoint = None
+        del checkpoint
         print(f"resume_checkpoint: path={resume_path} next_epoch={start_epoch + 1}")
 
     history_path = output_dir / "history.jsonl"

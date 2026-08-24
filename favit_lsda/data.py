@@ -257,13 +257,16 @@ def _transform_contract(transform) -> tuple[tuple[str, ...], tuple[int, int]]:
             "transform must expose expected_branches as explicit branch metadata"
         )
     branches = tuple(branches)
-    canonical = tuple(
-        name for name in ("rgb", "srm", "fft") if name in branches
+    canonical_layouts = (
+        ("rgb",),
+        ("rgb", "srm"),
+        ("rgb", "fft"),
+        ("rgb", "srm", "fft"),
     )
-    if not branches or branches != canonical:
+    if branches not in canonical_layouts:
         raise ValueError(
-            "transform expected_branches must be a canonical subset beginning "
-            f"with 'rgb', got {branches!r}"
+            "transform expected_branches must begin with 'rgb' and exactly "
+            f"follow canonical branch order, got {branches!r}"
         )
     if (
         not isinstance(spatial_size, (tuple, list))
