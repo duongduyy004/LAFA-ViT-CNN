@@ -5,7 +5,6 @@ import io
 import random
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -15,32 +14,6 @@ from torch.utils.data import Dataset
 from torchvision.transforms import ColorJitter
 from torchvision.transforms import functional as TF
 from torchvision.transforms.functional import InterpolationMode
-
-
-_ARTIFACT_LAYOUTS = {
-    "rgb": (), "rgb_srm": ("srm",), "rgb_fft": ("fft",),
-    "rgb_wavelet": ("wavelet",), "rgb_srm_fft": ("srm", "fft"),
-    "rgb_srm_wavelet": ("srm", "wavelet"),
-}
-
-
-def artifact_channels(mode: str) -> int:
-    try:
-        return 3 * (1 + len(_ARTIFACT_LAYOUTS[mode]))
-    except KeyError as error:
-        raise ValueError(f"unknown artifact mode: {mode}") from error
-
-
-def resolve_artifact_config(model_config: dict[str, Any]) -> tuple[str, int]:
-    """Read ``artifact_mode``/``cnn_in_channels`` out of a model config mapping.
-
-    ``cnn_in_channels`` defaults to the width its mode implies, matching every
-    caller's prior ad hoc resolution: config validation, model construction,
-    checkpoint validation, and the training CLI all need this exact pair.
-    """
-    mode = str(model_config.get("artifact_mode", "rgb"))
-    width = int(model_config.get("cnn_in_channels", artifact_channels(mode)))
-    return mode, width
 
 
 #: Absolute dynamic-range floor below which a signal counts as constant.
@@ -94,46 +67,27 @@ def _fft_artifact(rgb: Tensor) -> Tensor:
     )
 
 
-def _wavelet_artifact(rgb: Tensor) -> Tensor:
-    height, width = rgb.shape[-2:]
-    padded = F.pad(rgb, (0, width % 2, 0, height % 2), mode="replicate")
-    even_even, even_odd = padded[..., 0::2, 0::2], padded[..., 0::2, 1::2]
-    odd_even, odd_odd = padded[..., 1::2, 0::2], padded[..., 1::2, 1::2]
-    details = (
-        even_even - even_odd + odd_even - odd_odd
-        + even_even + even_odd - odd_even - odd_odd
-        + even_even - even_odd - odd_even + odd_odd
-    )
-    return details.repeat_interleave(2, -2).repeat_interleave(2, -1)[..., :height, :width]
-
-
-def build_cnn_input(
-    rgb: Tensor, mode: str, sample_path: str | Path | None = None
-) -> Tensor:
-    description = f"artifact mode {mode!r} for {sample_path or '<unknown path>'}"
-    try:
-        layout = _ARTIFACT_LAYOUTS[mode]
-    except KeyError as error:
-        raise ValueError(f"{description}: unknown artifact mode") from error
+def build_branch_inputs(
+    rgb: Tensor,
+    enable_srm: bool = False,
+    enable_fft: bool = False,
+    sample_path: str | Path | None = None,
+) -> dict[str, Tensor]:
+    description = f"branch inputs for {sample_path or '<unknown path>'}"
     if rgb.ndim != 3 or rgb.shape[0] != 3:
-        raise ValueError(f"{description}: expected RGB tensor with shape [3, H, W]")
-    if not rgb.is_floating_point():
-        raise ValueError(f"{description}: expected floating-point RGB tensor")
-    if not torch.isfinite(rgb).all():
-        raise ValueError(f"{description}: RGB tensor must be finite")
-    if _is_constant(rgb):
-        # Derived artifacts of a (near-)constant frame carry no signal, and some
-        # of them -- FFT especially, whose DC term dwarfs everything else -- have
-        # a wide range even so. Skip them entirely rather than normalizing noise.
-        artifacts = [torch.zeros_like(rgb) for _ in layout]
-    else:
-        builders = {
-            "srm": _srm_artifact,
-            "fft": _fft_artifact,
-            "wavelet": _wavelet_artifact,
-        }
-        artifacts = [builders[name](rgb) for name in layout]
-    return torch.cat([rgb] + [_normalize_artifact(artifact) for artifact in artifacts])
+        raise ValueError(f"{description}: expected RGB tensor [3, H, W]")
+    if not rgb.is_floating_point() or not torch.isfinite(rgb).all():
+        raise ValueError(f"{description}: RGB must be finite floating point")
+    result = {"rgb": rgb}
+    constant = _is_constant(rgb)
+    for name, enabled, builder in (
+        ("srm", enable_srm, _srm_artifact),
+        ("fft", enable_fft, _fft_artifact),
+    ):
+        if enabled:
+            artifact = torch.zeros_like(rgb) if constant else builder(rgb)
+            result[name] = _normalize_artifact(artifact)
+    return result
 
 
 class FaceTransform:
@@ -155,7 +109,8 @@ class FaceTransform:
         degradation_probability: float = 0.0,
         jpeg_probability: float = 0.0,
         jpeg_quality_min: int = 40,
-        artifact_mode: str = "rgb",
+        enable_srm: bool = False,
+        enable_fft: bool = False,
     ) -> None:
         self.image_size = image_size
         self.horizontal_flip = horizontal_flip
@@ -165,8 +120,8 @@ class FaceTransform:
         self.degradation_probability = float(degradation_probability)
         self.jpeg_probability = float(jpeg_probability)
         self.jpeg_quality_min = int(jpeg_quality_min)
-        artifact_channels(artifact_mode)
-        self.artifact_mode = artifact_mode
+        self.enable_srm = bool(enable_srm)
+        self.enable_fft = bool(enable_fft)
         probabilities = (
             horizontal_flip,
             grayscale_probability,
@@ -257,7 +212,7 @@ class FaceTransform:
         flip: bool = False,
         crop: tuple[float, float, float] | None = None,
         sample_path: str | Path | None = None,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> dict[str, Tensor]:
         if image.mode != "RGB":
             raise ValueError(f"expected RGB image: {sample_path or '<unknown path>'}")
         image = self._resize_crop(image, crop or self.sample_crop())
@@ -269,7 +224,9 @@ class FaceTransform:
             image = TF.rgb_to_grayscale(image, num_output_channels=3)
         image = self._apply_degradation(image)
         rgb = TF.normalize(TF.to_tensor(image), [0.5] * 3, [0.5] * 3)
-        return rgb, build_cnn_input(rgb, self.artifact_mode, sample_path)
+        return build_branch_inputs(
+            rgb, self.enable_srm, self.enable_fft, sample_path
+        )
 
 
 def _read_manifest(path: str | Path) -> list[dict[str, str]]:
@@ -285,7 +242,7 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
-class GroupedForgeryDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
+class GroupedForgeryDataset(Dataset[tuple[dict[str, Tensor], Tensor]]):
     """Build LSDA groups in canonical order: real, then each forgery method."""
 
     REQUIRED_COLUMNS = {"fake_path", "real_path", "method"}
@@ -331,7 +288,7 @@ class GroupedForgeryDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
     def __len__(self) -> int:
         return len(self.groups)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor, Tensor]:
+    def __getitem__(self, index: int) -> tuple[dict[str, Tensor], Tensor]:
         real_path, method_rows = self.groups[index]
         real_source = _resolve(self.data_root, real_path)
         with Image.open(real_source) as image:
@@ -344,17 +301,22 @@ class GroupedForgeryDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
                 selected_fakes.append((image.copy(), fake_source))
         flip = self.transform.sample_flip()
         crop = self.transform.sample_crop()
-        pairs = [self.transform(real, flip, crop, real_source)] + [
+        samples = [self.transform(real, flip, crop, real_source)] + [
             self.transform(image, flip, crop, fake_source)
             for image, fake_source in selected_fakes
         ]
-        rgb_images = torch.stack([rgb for rgb, _ in pairs])
-        cnn_images = torch.stack([cnn for _, cnn in pairs])
+        keys = tuple(samples[0])
+        if any(tuple(sample) != keys for sample in samples[1:]):
+            raise ValueError("inconsistent branch keys within LSDA group")
+        inputs = {
+            name: torch.stack([sample[name] for sample in samples])
+            for name in keys
+        }
         domain_labels = torch.arange(len(self.forgery_methods) + 1, dtype=torch.long)
-        return rgb_images, cnn_images, domain_labels
+        return inputs, domain_labels
 
 
-class FrameFaceDataset(Dataset[tuple[Tensor, Tensor, int, str]]):
+class FrameFaceDataset(Dataset[tuple[dict[str, Tensor], int, str]]):
     REQUIRED_COLUMNS = {"path", "label", "video_id"}
 
     def __init__(
@@ -370,9 +332,9 @@ class FrameFaceDataset(Dataset[tuple[Tensor, Tensor, int, str]]):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor, int, str]:
+    def __getitem__(self, index: int) -> tuple[dict[str, Tensor], int, str]:
         row = self.rows[index]
         source = _resolve(self.data_root, row["path"])
         with Image.open(source) as image:
-            rgb, cnn = self.transform(image.copy(), sample_path=source)
-        return rgb, cnn, int(row["label"]), row["video_id"]
+            branch_inputs = self.transform(image.copy(), sample_path=source)
+        return branch_inputs, int(row["label"]), row["video_id"]
