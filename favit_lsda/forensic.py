@@ -23,8 +23,10 @@ class ProjectedForensicEncoder(nn.Module):
             num_classes=0,
             global_pool="avg",
         )
+        # Some timm models report the pre-head map width in num_features while
+        # forward() returns the post-head pooled width; infer the latter.
         self.project = nn.Sequential(
-            nn.Linear(int(self.backbone.num_features), embed_dim),
+            nn.LazyLinear(embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
             nn.Dropout(dropout),

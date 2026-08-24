@@ -58,6 +58,22 @@ def test_encoder_builds_requested_pretrained_model(monkeypatch, name):
 
 
 @pytest.mark.parametrize(
+    ("name", "expected_width"),
+    [("xception", 2048), ("mobilenetv3_small_100", 1024)],
+)
+@pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
+def test_encoder_projects_real_backbone_output_width(name, expected_width):
+    model = ProjectedForensicEncoder(name, 7, False, 0.0).eval()
+
+    with torch.no_grad():
+        output = model(torch.randn(1, 3, 64, 64))
+
+    assert output.shape == (1, 7)
+    assert torch.isfinite(output).all()
+    assert model.project[0].in_features == expected_width
+
+
+@pytest.mark.parametrize(
     "images",
     [
         torch.randn(3, 16, 16),
