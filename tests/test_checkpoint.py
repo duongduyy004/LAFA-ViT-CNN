@@ -142,6 +142,29 @@ def test_checkpoint_rejects_legacy_v3_with_migration_message(tmp_path):
         validate_checkpoint_branches(checkpoint, {}, tmp_path / "old.pt")
 
 
+def test_checkpoint_rejects_absent_top_level_branch_metadata(tmp_path):
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+
+    checkpoint = _tiny_checkpoint(TINY_MODEL_CONFIG)
+    del checkpoint["enabled_branches"]
+    with pytest.raises(ValueError, match=r"checkpoint/config branch mismatch"):
+        validate_checkpoint_branches(
+            checkpoint, TINY_MODEL_CONFIG, tmp_path / "missing-branches.pt"
+        )
+
+
+def test_checkpoint_rejects_malformed_top_level_branch_metadata(tmp_path):
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+
+    checkpoint = _tiny_checkpoint(TINY_MODEL_CONFIG)
+    checkpoint["enabled_branches"] = "rgb"
+    checkpoint["fusion"] = {"name": "fixed_slot_concat"}
+    with pytest.raises(ValueError, match=r"checkpoint/config branch mismatch"):
+        validate_checkpoint_branches(
+            checkpoint, TINY_MODEL_CONFIG, tmp_path / "malformed-branches.pt"
+        )
+
+
 def _tiny_checkpoint(model_config: dict, state: dict | None = None) -> dict:
     branches = resolve_branch_config(model_config)
     return {
