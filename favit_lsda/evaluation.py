@@ -122,13 +122,15 @@ def run_evaluation(
         args.manifest, data_config, default_manifest_keys
     )
     model = _load_model(args.checkpoint, config, device)
+    enabled_branches = tuple(model.enabled_branches)
 
     dataset = FrameFaceDataset(
         manifest,
         data_config["root"],
         FaceTransform(
             int(data_config.get("image_size", 224)),
-            artifact_mode=model.artifact_mode,
+            enable_srm="srm" in enabled_branches,
+            enable_fft="fft" in enabled_branches,
         ),
     )
     batch_size = (

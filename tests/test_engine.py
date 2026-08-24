@@ -1,15 +1,4 @@
-"""End-to-end wiring test for the training/evaluation loops.
-
-`favit_lsda/engine.py` is the seam where dataset output order meets model input
-order. Both datasets emit RGB first and the artifact tensor second, and both
-loops must forward them in that order. Nothing else in the suite exercises that
-contract with real datasets, a real DataLoader and a real model at once, so an
-accidental argument swap between `(rgb, cnn)` and `(cnn, rgb)` would otherwise
-only surface at training time.
-
-The fixture deliberately uses a non-`rgb` artifact mode so the two tensors have
-different channel widths (3 vs 6): a swap then cannot silently type-check.
-"""
+"""Integration coverage for mapping-based train/evaluation wiring."""
 
 from __future__ import annotations
 
@@ -18,16 +7,35 @@ import math
 
 import torch
 from PIL import Image
+from torch import nn
 from torch.utils.data import DataLoader
 
+from favit_lsda.config import resolve_branch_config
 from favit_lsda.data import FaceTransform, FrameFaceDataset, GroupedForgeryDataset
 from favit_lsda.engine import evaluate_at_level, train_one_epoch
 from favit_lsda.losses import FineGrainedAdaptiveLoss
 from favit_lsda.model import create_favit_lsda
+from train import build_optimizer
 
-ARTIFACT_MODE = "rgb_srm"
-CNN_IN_CHANNELS = 6
 METHODS = ("DF", "F2F")
+
+
+class _FakeForensicEncoder(nn.Module):
+    def __init__(self, model_name, embed_dim, pretrained, dropout):
+        super().__init__()
+        assert pretrained is False
+        self.model_name = model_name
+        self.backbone = nn.Conv2d(3, 3, kernel_size=1, bias=False)
+        self.project = nn.Sequential(
+            nn.Linear(3, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, images):
+        pooled = self.backbone(images).mean(dim=(-2, -1))
+        return self.project(pooled)
 
 
 def _write_fixture(tmp_path):
@@ -62,18 +70,20 @@ def _write_fixture(tmp_path):
     return pairs, frames
 
 
-def test_engine_loops_match_dataset_output_to_model_input_order(tmp_path):
+def test_engine_loops_forward_enabled_branch_mappings(monkeypatch, tmp_path):
     pairs, frames = _write_fixture(tmp_path)
+    monkeypatch.setattr("favit_lsda.model.ProjectedForensicEncoder", _FakeForensicEncoder)
     device = torch.device("cpu")
-    transform = FaceTransform(224, artifact_mode=ARTIFACT_MODE)
+    transform = FaceTransform(224, enable_srm=True, enable_fft=True)
     model = create_favit_lsda(
         model_name="vit_tiny_patch16_224",
         pretrained=False,
         forgery_methods=METHODS,
         train_backbone_norms=False,
         train_cls_token=False,
-        artifact_mode=ARTIFACT_MODE,
-        cnn_in_channels=CNN_IN_CHANNELS,
+        enable_srm_branch=True,
+        enable_fft_branch=True,
+        forensic_pretrained=False,
     ).to(device)
 
     train_loader = DataLoader(
@@ -110,3 +120,39 @@ def test_engine_loops_match_dataset_output_to_model_input_order(tmp_path):
     assert metrics["num_frames"] == 4
     assert 0.0 <= metrics["auc"] <= 1.0
     assert math.isfinite(metrics["accuracy"])
+
+
+def test_optimizer_reduces_learning_rate_for_every_pretrained_backbone(monkeypatch):
+    monkeypatch.setattr("favit_lsda.model.ProjectedForensicEncoder", _FakeForensicEncoder)
+    model = create_favit_lsda(
+        model_name="vit_tiny_patch16_224",
+        pretrained=False,
+        forgery_methods=METHODS,
+        train_backbone_norms=False,
+        train_cls_token=False,
+        enable_srm_branch=True,
+        enable_fft_branch=True,
+        forensic_pretrained=False,
+    )
+    optimizer = build_optimizer(
+        model,
+        {"learning_rate": 1e-3, "backbone_lr_multiplier": 0.2},
+    )
+    rates_by_name = {
+        name: group["lr"]
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+        for name, candidate in model.named_parameters()
+        if candidate is parameter
+    }
+    assert rates_by_name["srm_encoder.backbone.weight"] == 2e-4
+    assert rates_by_name["fft_encoder.backbone.weight"] == 2e-4
+    assert rates_by_name["srm_encoder.project.0.weight"] == 1e-3
+    assert rates_by_name["fft_encoder.project.0.weight"] == 1e-3
+    assert rates_by_name["late_fusion.0.weight"] == 1e-3
+
+
+def test_branch_config_order_is_the_transform_contract():
+    assert resolve_branch_config(
+        {"enable_srm_branch": True, "enable_fft_branch": True}
+    ).enabled_branches == ("rgb", "srm", "fft")

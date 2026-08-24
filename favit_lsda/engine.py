@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -11,9 +11,20 @@ from .losses import FineGrainedAdaptiveLoss, balanced_binary_cross_entropy
 from .metrics import EvaluationLevel, evaluation_metrics
 
 
+def move_branch_inputs(
+    inputs: Mapping[str, Tensor], device: torch.device
+) -> dict[str, Tensor]:
+    """Move each enabled branch tensor without changing the mapping contract."""
+
+    return {
+        name: value.to(device, non_blocking=True)
+        for name, value in inputs.items()
+    }
+
+
 def train_one_epoch(
     model: nn.Module,
-    loader: Iterable[tuple[Tensor, Tensor, Tensor]],
+    loader: Iterable[tuple[Mapping[str, Tensor], Tensor]],
     optimizer: torch.optim.Optimizer,
     fal_criterion: FineGrainedAdaptiveLoss,
     weights: dict[str, float],
@@ -38,13 +49,12 @@ def train_one_epoch(
     }
     batches = 0
     use_amp = scaler is not None and scaler.is_enabled()
-    for grouped_rgb, grouped_cnn, domain_labels in tqdm(loader, desc="train", leave=False):
-        grouped_rgb = grouped_rgb.to(device, non_blocking=True)
-        grouped_cnn = grouped_cnn.to(device, non_blocking=True)
+    for grouped_inputs, domain_labels in tqdm(loader, desc="train", leave=False):
+        grouped_inputs = move_branch_inputs(grouped_inputs, device)
         domain_labels = domain_labels.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=use_amp):
-            output = model.forward_group(grouped_rgb, grouped_cnn)
+            output = model.forward_group(grouped_inputs)
             logits = output["logits"]
             features = output["features"]
             binary_labels = (domain_labels > 0).long()
@@ -121,7 +131,7 @@ def train_one_epoch(
 @torch.inference_mode()
 def evaluate_at_level(
     model: nn.Module,
-    loader: Iterable[tuple[Tensor, Tensor, Tensor, list[str]]],
+    loader: Iterable[tuple[Mapping[str, Tensor], Tensor, list[str]]],
     device: torch.device,
     level: EvaluationLevel = "video",
     threshold: float = 0.5,
@@ -133,12 +143,11 @@ def evaluate_at_level(
     probabilities: list[float] = []
     labels: list[int] = []
     video_ids: list[str] = []
-    for rgb, cnn, batch_labels, batch_video_ids in tqdm(
+    for inputs, batch_labels, batch_video_ids in tqdm(
         loader, desc=description, leave=False
     ):
-        rgb = rgb.to(device, non_blocking=True)
-        cnn = cnn.to(device, non_blocking=True)
-        logits = model(rgb, cnn)
+        inputs = move_branch_inputs(inputs, device)
+        logits = model(inputs)
         probabilities.extend(logits.softmax(dim=1)[:, 1].cpu().tolist())
         labels.extend(batch_labels.tolist())
         video_ids.extend(batch_video_ids)

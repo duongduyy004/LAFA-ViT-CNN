@@ -15,6 +15,7 @@ from favit_lsda.checkpoints import validate_checkpoint_artifacts
 from favit_lsda.config import (
     build_model_from_config,
     load_config,
+    resolve_branch_config,
     resolve_device,
     seed_everything,
     validate_model_config,
@@ -23,7 +24,6 @@ from favit_lsda.data import (
     FaceTransform,
     FrameFaceDataset,
     GroupedForgeryDataset,
-    resolve_artifact_config,
 )
 from favit_lsda.engine import evaluate_at_level, train_one_epoch
 from favit_lsda.losses import FineGrainedAdaptiveLoss
@@ -132,7 +132,9 @@ def build_optimizer(
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        is_backbone = name.startswith("backbone.")
+        is_backbone = name.startswith(
+            ("backbone.", "srm_encoder.backbone.", "fft_encoder.backbone.")
+        )
         use_decay = parameter.ndim > 1 and not name.endswith(".bias")
         groups.setdefault((is_backbone, use_decay), []).append(parameter)
     parameter_groups = [
@@ -195,9 +197,7 @@ def main() -> None:
     train_config = config["train"]
     loss_config = config["loss"]
     validate_model_config(model_config)
-    # Only the transforms need this before the model exists; the saved
-    # checkpoint metadata reads the model's own attributes instead.
-    artifact_mode, _ = resolve_artifact_config(model_config)
+    branch_config = resolve_branch_config(model_config)
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "config.yaml").open("w", encoding="utf-8") as handle:
@@ -225,7 +225,8 @@ def main() -> None:
         ),
         jpeg_probability=float(augmentation.get("jpeg_probability", 0.0)),
         jpeg_quality_min=int(augmentation.get("jpeg_quality_min", 40)),
-        artifact_mode=artifact_mode,
+        enable_srm=branch_config.enable_srm,
+        enable_fft=branch_config.enable_fft,
     )
     train_dataset = GroupedForgeryDataset(
         data_config["train_pairs"], data_config["root"], train_transform, methods
@@ -248,7 +249,9 @@ def main() -> None:
         persistent_workers=num_workers > 0,
     )
     clean_transform = FaceTransform(
-        int(data_config.get("image_size", 224)), artifact_mode=artifact_mode
+        int(data_config.get("image_size", 224)),
+        enable_srm=branch_config.enable_srm,
+        enable_fft=branch_config.enable_fft,
     )
     selection_manifest = data_config.get("validation_frames")
     if selection_manifest:
@@ -408,8 +411,6 @@ def main() -> None:
             # Read off the model instance rather than the config-derived locals
             # so the persisted metadata is definitionally what the model is,
             # and cannot drift from it via a second resolution site.
-            "artifact_mode": model.artifact_mode,
-            "cnn_in_channels": model.cnn_in_channels,
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
