@@ -81,8 +81,12 @@ full-finetune; chỉ phần FA-ViT được điều chỉnh theo các cờ
 pretrained dùng `backbone_lr_multiplier`; projection, fusion và head dùng base
 learning rate. Tests monkeypatch timm và không tải weights.
 
-`model.pretrained: false` hoặc `--init-favit` trong các test/offline path sẽ
-không tải pretrained encoder. Tất cả ảnh input của forensic encoder vẫn phải là
+`model.pretrained: false` chỉ tắt pretrained weights của FA-ViT; nó không tự
+ghi đè `forensic_pretrained`. Muốn chạy hoàn toàn offline/no-download, đặt cả
+`model.pretrained: false` và `model.forensic_pretrained: false`. API
+`build_model_from_config(..., pretrained=False)` và các đường `train.py` dùng
+`--init-favit` hoặc `--resume` truyền override này, nên cũng tắt pretrained
+weights của forensic encoders. Tất cả ảnh input của forensic encoder vẫn phải là
 tensor floating-point hữu hạn với shape `[B, 3, H, W]`.
 
 ## Bốn ablation configs
