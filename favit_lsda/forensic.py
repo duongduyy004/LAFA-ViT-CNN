@@ -5,6 +5,23 @@ import torch
 from torch import Tensor, nn
 
 
+def _backbone_output_width(backbone: nn.Module, model_name: str) -> int:
+    """Resolve the width returned by a pooled timm backbone without a probe."""
+    for attribute in ("head_hidden_size", "num_features"):
+        value = getattr(backbone, attribute, None)
+        if value is None:
+            continue
+        try:
+            width = int(value)
+        except (TypeError, ValueError):
+            continue
+        if width > 0:
+            return width
+    raise ValueError(
+        f"{model_name} backbone must expose a positive head_hidden_size or num_features"
+    )
+
+
 class ProjectedForensicEncoder(nn.Module):
     """Adapt a pooled forensic backbone to the FA-ViT embedding width."""
 
@@ -23,10 +40,9 @@ class ProjectedForensicEncoder(nn.Module):
             num_classes=0,
             global_pool="avg",
         )
-        # Some timm models report the pre-head map width in num_features while
-        # forward() returns the post-head pooled width; infer the latter.
+        output_width = _backbone_output_width(self.backbone, model_name)
         self.project = nn.Sequential(
-            nn.LazyLinear(embed_dim),
+            nn.Linear(output_width, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU(),
             nn.Dropout(dropout),

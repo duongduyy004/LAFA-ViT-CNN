@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.nn.parameter import UninitializedParameter
 
 
 def _install_data_import_compatibility():
@@ -71,6 +72,22 @@ def test_encoder_projects_real_backbone_output_width(name, expected_width):
     assert output.shape == (1, 7)
     assert torch.isfinite(output).all()
     assert model.project[0].in_features == expected_width
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_width"),
+    [("xception", 2048), ("mobilenetv3_small_100", 1024)],
+)
+@pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
+def test_encoder_parameters_are_initialized_before_forward(name, expected_width):
+    model = ProjectedForensicEncoder(name, 7, False, 0.0)
+
+    assert not any(
+        isinstance(parameter, UninitializedParameter) for parameter in model.parameters()
+    )
+    assert sum(parameter.numel() for parameter in model.parameters()) > 0
+    state = model.state_dict()
+    assert state["project.0.weight"].shape == (7, expected_width)
 
 
 @pytest.mark.parametrize(
