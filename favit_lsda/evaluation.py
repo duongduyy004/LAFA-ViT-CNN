@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from .checkpoints import validate_checkpoint_artifacts
+from .checkpoints import validate_checkpoint_branches
 from .config import build_model_from_config, load_config, resolve_device
 from .data import FaceTransform, FrameFaceDataset
 from .engine import evaluate_at_level
@@ -52,7 +52,7 @@ def _load_model(
     # checkpoint carries: comparing the checkpoint's metadata to its own
     # embedded config is a self-comparison that can never fail, and would let
     # an evaluation run under a mode/width the caller never asked for.
-    validate_checkpoint_artifacts(checkpoint, config["model"], checkpoint_path)
+    validate_checkpoint_branches(checkpoint, config["model"], checkpoint_path)
     # Only once the request is known to match may the checkpoint's own config
     # be trusted for construction; it is the more complete record of how the
     # model was actually built. Re-validate it against the checkpoint's
@@ -60,26 +60,9 @@ def _load_model(
     # so a checkpoint whose nested config was edited out of step with its
     # top-level fields is still caught before construction.
     model_config = checkpoint.get("config", config)["model"]
-    validate_checkpoint_artifacts(checkpoint, model_config, checkpoint_path)
+    validate_checkpoint_branches(checkpoint, model_config, checkpoint_path)
     model = build_model_from_config(model_config, pretrained=False).to(device)
-    incompatible = model.load_state_dict(checkpoint["model"], strict=False)
-    allowed_missing_prefixes = (
-        "latent_augmenter.comprehensive_scale",
-        "student_domain_classifier.",
-    )
-    invalid_missing = [
-        key
-        for key in incompatible.missing_keys
-        if not key.startswith(allowed_missing_prefixes)
-    ]
-    if invalid_missing or incompatible.unexpected_keys:
-        raise RuntimeError(
-            "checkpoint/model mismatch: "
-            f"missing={invalid_missing[:5]} "
-            f"unexpected={incompatible.unexpected_keys[:5]}"
-        )
-    if incompatible.missing_keys:
-        print("note: evaluating a legacy checkpoint with inference-neutral new layers")
+    model.load_state_dict(checkpoint["model"], strict=True)
     return model
 
 

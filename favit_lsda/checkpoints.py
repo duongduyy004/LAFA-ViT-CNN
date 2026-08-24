@@ -1,51 +1,52 @@
-"""Checkpoint metadata validation shared by training and evaluation.
-
-Kept separate from ``train.py`` so that ``favit_lsda/evaluation.py`` can
-validate checkpoint compatibility without importing the CLI training module.
-"""
+"""Checkpoint metadata validation shared by training and evaluation."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-EXPECTED_ARCHITECTURE = "favit_lsda_cnn"
-SUPPORTED_FORMAT_VERSION = 3
+EXPECTED_ARCHITECTURE = "favit_lsda_multibranch"
+SUPPORTED_FORMAT_VERSION = 4
 
 
-def validate_checkpoint_artifacts(
+def model_branch_metadata(model) -> dict[str, Any]:
+    """Return the authoritative v4 branch metadata for a constructed model."""
+    return {
+        "format_version": SUPPORTED_FORMAT_VERSION,
+        "architecture": EXPECTED_ARCHITECTURE,
+        "enabled_branches": list(model.enabled_branches),
+        "srm_backbone": model.srm_backbone_name,
+        "fft_backbone": model.fft_backbone_name,
+        "fusion": model.fusion_name,
+    }
+
+
+def validate_checkpoint_branches(
     checkpoint: dict[str, Any],
     model_config: dict[str, Any],
     checkpoint_path: Path,
 ) -> None:
-    """Reject a checkpoint before its state is loaded or used for inference.
-
-    Three independent checks run, in order:
-
-    1. Legacy architecture rejection: a checkpoint saved before the CNN
-       artifact branch existed (``architecture`` other than
-       ``"favit_lsda_cnn"``) cannot be resumed or evaluated directly; it must
-       be loaded with ``--init-favit`` into a fresh model instead.
-    2. Format version rejection: ``format_version`` is written on save but
-       would otherwise never be read back, so a future bump of the on-disk
-       layout would load silently against code that cannot interpret it.
-       Only ``SUPPORTED_FORMAT_VERSION`` is accepted.
-    3. Artifact mismatch rejection: the checkpoint's saved ``artifact_mode``
-       and ``cnn_in_channels`` must match what ``model_config`` requests, so
-       a checkpoint trained with one CNN artifact mode is never silently
-       resumed or evaluated under a different one.
-    """
-    from .data import resolve_artifact_config
-
+    """Reject incompatible multibranch checkpoints before state loading."""
     architecture = checkpoint.get("architecture")
-    if architecture != EXPECTED_ARCHITECTURE:
-        raise ValueError(
-            f"checkpoint at {checkpoint_path} has legacy architecture {architecture!r}; "
-            f"expected {EXPECTED_ARCHITECTURE!r}. Start a new run and load this "
-            "checkpoint with --init-favit instead of --resume or evaluation."
-        )
-
     format_version = checkpoint.get("format_version")
+    if architecture != EXPECTED_ARCHITECTURE:
+        if format_version == 3 or architecture == "favit_lsda_cnn":
+            raise ValueError(
+                f"checkpoint at {checkpoint_path} has legacy architecture "
+                f"{architecture!r} (legacy format_version {format_version!r}); "
+                "migrate it by starting a new run and loading it with "
+                "--init-favit instead of --resume or evaluation."
+            )
+        raise ValueError(
+            f"checkpoint at {checkpoint_path} has unsupported architecture "
+            f"{architecture!r}; expected {EXPECTED_ARCHITECTURE!r}"
+        )
+    if format_version == 3:
+        raise ValueError(
+            f"checkpoint at {checkpoint_path} is a legacy format_version 3 "
+            "checkpoint; migrate it by starting a new run and loading it "
+            "with --init-favit instead of --resume or evaluation."
+        )
     if format_version != SUPPORTED_FORMAT_VERSION:
         raise ValueError(
             f"checkpoint at {checkpoint_path} has unsupported format_version "
@@ -54,13 +55,18 @@ def validate_checkpoint_artifacts(
             "or start a new run and load it with --init-favit."
         )
 
-    checkpoint_mode = checkpoint.get("artifact_mode")
-    checkpoint_width = checkpoint.get("cnn_in_channels")
-    config_mode, config_width = resolve_artifact_config(model_config)
-    if checkpoint_mode != config_mode or checkpoint_width != config_width:
+    from .config import resolve_branch_config
+
+    branches = resolve_branch_config(model_config)
+    expected = {
+        "enabled_branches": list(branches.enabled_branches),
+        "srm_backbone": branches.srm_backbone if branches.enable_srm else None,
+        "fft_backbone": branches.fft_backbone if branches.enable_fft else None,
+        "fusion": "fixed_slot_concat",
+    }
+    actual = {key: checkpoint.get(key) for key in expected}
+    if actual != expected:
         raise ValueError(
-            "checkpoint/config artifact mismatch: "
-            f"checkpoint mode={checkpoint_mode!r} width={checkpoint_width!r}, "
-            f"config mode={config_mode!r} width={config_width!r} "
-            f"({checkpoint_path})"
+            "checkpoint/config branch mismatch: "
+            f"checkpoint={actual!r}, config={expected!r}, path={checkpoint_path}"
         )

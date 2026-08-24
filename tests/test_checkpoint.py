@@ -9,6 +9,7 @@ from PIL import Image
 
 import train
 from favit_lsda.config import build_model_from_config
+from favit_lsda.config import resolve_branch_config
 from train import load_favit_initialization, save_checkpoint
 
 TINY_MODEL_CONFIG = {
@@ -18,8 +19,8 @@ TINY_MODEL_CONFIG = {
     "forgery_methods": ["DF", "F2F"],
     "train_backbone_norms": False,
     "train_cls_token": False,
-    "artifact_mode": "rgb",
-    "cnn_in_channels": 3,
+    "enable_srm_branch": False,
+    "enable_fft_branch": False,
 }
 
 
@@ -55,61 +56,101 @@ def test_favit_initialization_loads_only_compatible_tensors(tmp_path):
 
 
 def test_favit_initialization_excludes_head_even_when_shape_matches(tmp_path):
-    model = torch.nn.Sequential(torch.nn.Linear(3, 2), torch.nn.Linear(2, 1))
-    model.head = torch.nn.Linear(2, 2, bias=False)
+    class Detector(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.body = torch.nn.Linear(3, 2)
+            self.head = torch.nn.Linear(2, 2, bias=False)
+            self.srm_encoder = torch.nn.Linear(3, 2, bias=False)
+            self.fft_encoder = torch.nn.Linear(3, 2, bias=False)
+            self.late_fusion = torch.nn.Linear(4, 2, bias=False)
+
+    model = Detector()
     original_head_weight = model.head.weight.detach().clone()
+    original_srm_weight = model.srm_encoder.weight.detach().clone()
+    original_fft_weight = model.fft_encoder.weight.detach().clone()
+    original_fusion_weight = model.late_fusion.weight.detach().clone()
     checkpoint = {
         "model": {
-            "0.weight": torch.full_like(model[0].weight, 7.0),
+            "body.weight": torch.full_like(model.body.weight, 7.0),
             "head.weight": torch.full_like(model.head.weight, 3.0),
+            "srm_encoder.weight": torch.full_like(model.srm_encoder.weight, 5.0),
+            "fft_encoder.weight": torch.full_like(model.fft_encoder.weight, 6.0),
+            "late_fusion.weight": torch.full_like(model.late_fusion.weight, 8.0),
         }
     }
     path = tmp_path / "favit.pt"
     torch.save(checkpoint, path)
     loaded = load_favit_initialization(model, path)
     assert loaded == 1
-    assert torch.equal(model[0].weight, torch.full_like(model[0].weight, 7.0))
+    assert torch.equal(model.body.weight, torch.full_like(model.body.weight, 7.0))
     assert torch.equal(model.head.weight, original_head_weight)
+    assert torch.equal(model.srm_encoder.weight, original_srm_weight)
+    assert torch.equal(model.fft_encoder.weight, original_fft_weight)
+    assert torch.equal(model.late_fusion.weight, original_fusion_weight)
 
 
 def test_checkpoint_rejects_artifact_metadata_mismatch(tmp_path):
-    from favit_lsda.checkpoints import validate_checkpoint_artifacts
-    checkpoint = {"format_version": 3, "architecture": "favit_lsda_cnn", "artifact_mode": "rgb_fft", "cnn_in_channels": 6}
-    with pytest.raises(ValueError, match=r"checkpoint/config artifact mismatch.*rgb_srm"):
-        validate_checkpoint_artifacts(checkpoint, {"artifact_mode": "rgb_srm", "cnn_in_channels": 6}, tmp_path / "last.pt")
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+    checkpoint = _tiny_checkpoint({"enable_srm_branch": False, "enable_fft_branch": True})
+    with pytest.raises(ValueError, match=r"checkpoint/config branch mismatch.*rgb"):
+        validate_checkpoint_branches(
+            checkpoint,
+            {"enable_srm_branch": True, "enable_fft_branch": False},
+            tmp_path / "last.pt",
+        )
 
 
 def test_checkpoint_rejects_legacy_architecture(tmp_path):
-    from favit_lsda.checkpoints import validate_checkpoint_artifacts
-    checkpoint = {"architecture": "favit_lsda", "artifact_mode": "rgb", "cnn_in_channels": 3}
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+    checkpoint = {
+        "format_version": 4,
+        "architecture": "favit_lsda_cnn",
+    }
     with pytest.raises(ValueError, match=r"legacy architecture.*--init-favit"):
-        validate_checkpoint_artifacts(
-            checkpoint, {"artifact_mode": "rgb", "cnn_in_channels": 3}, tmp_path / "old.pt"
+        validate_checkpoint_branches(
+            checkpoint, {}, tmp_path / "old.pt"
         )
 
 
-@pytest.mark.parametrize("version", [4, 2, None, "3"])
+@pytest.mark.parametrize("version", [5, 2, None, "4"])
 def test_checkpoint_rejects_unsupported_format_version(tmp_path, version):
     """Catches a future on-disk format bump loading silently against old code."""
-    from favit_lsda.checkpoints import validate_checkpoint_artifacts
+    from favit_lsda.checkpoints import validate_checkpoint_branches
     checkpoint = {
         "format_version": version,
-        "architecture": "favit_lsda_cnn",
-        "artifact_mode": "rgb",
-        "cnn_in_channels": 3,
+        "architecture": "favit_lsda_multibranch",
+        "enabled_branches": ["rgb"],
+        "srm_backbone": None,
+        "fft_backbone": None,
+        "fusion": "fixed_slot_concat",
     }
     with pytest.raises(ValueError, match=r"unsupported format_version"):
-        validate_checkpoint_artifacts(
-            checkpoint, {"artifact_mode": "rgb", "cnn_in_channels": 3}, tmp_path / "future.pt"
+        validate_checkpoint_branches(
+            checkpoint, {}, tmp_path / "future.pt"
         )
+
+
+def test_checkpoint_rejects_legacy_v3_with_migration_message(tmp_path):
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+
+    checkpoint = {
+        "format_version": 3,
+        "architecture": "favit_lsda_cnn",
+    }
+    with pytest.raises(ValueError, match=r"legacy.*format_version 3.*--init-favit"):
+        validate_checkpoint_branches(checkpoint, {}, tmp_path / "old.pt")
 
 
 def _tiny_checkpoint(model_config: dict, state: dict | None = None) -> dict:
+    branches = resolve_branch_config(model_config)
     return {
-        "format_version": 3,
-        "architecture": "favit_lsda_cnn",
-        "artifact_mode": model_config["artifact_mode"],
-        "cnn_in_channels": model_config["cnn_in_channels"],
+        "format_version": 4,
+        "architecture": "favit_lsda_multibranch",
+        "enabled_branches": list(branches.enabled_branches),
+        "srm_backbone": branches.srm_backbone if branches.enable_srm else None,
+        "fft_backbone": branches.fft_backbone if branches.enable_fft else None,
+        "fusion": "fixed_slot_concat",
         "config": {"model": model_config},
         "model": state if state is not None else {},
     }
@@ -124,11 +165,11 @@ def test_evaluation_validates_checkpoint_against_cli_config_not_embedded_config(
     """
     from favit_lsda import evaluation
 
-    checkpoint_config = {**TINY_MODEL_CONFIG, "artifact_mode": "rgb_fft", "cnn_in_channels": 6}
+    checkpoint_config = {**TINY_MODEL_CONFIG, "enable_srm_branch": False, "enable_fft_branch": True}
     path = tmp_path / "best.pt"
     torch.save(_tiny_checkpoint(checkpoint_config), path)
-    cli_config = {"model": {**TINY_MODEL_CONFIG, "artifact_mode": "rgb_srm", "cnn_in_channels": 6}}
-    with pytest.raises(ValueError, match=r"checkpoint/config artifact mismatch.*rgb_srm"):
+    cli_config = {"model": {**TINY_MODEL_CONFIG, "enable_srm_branch": True, "enable_fft_branch": False}}
+    with pytest.raises(ValueError, match=r"checkpoint/config branch mismatch.*rgb"):
         evaluation._load_model(path, cli_config, torch.device("cpu"))
 
 
@@ -143,7 +184,7 @@ def test_evaluation_rejects_mismatched_checkpoint_before_touching_model_state(
     assert any(value.abs().sum() > 0 for value in snapshot.values())
     poisoned = {key: torch.zeros_like(value) for key, value in snapshot.items()}
 
-    checkpoint_config = {**TINY_MODEL_CONFIG, "artifact_mode": "rgb_srm", "cnn_in_channels": 6}
+    checkpoint_config = {**TINY_MODEL_CONFIG, "enable_srm_branch": True, "enable_fft_branch": False}
     path = tmp_path / "best.pt"
     torch.save(_tiny_checkpoint(checkpoint_config, poisoned), path)
 
@@ -154,7 +195,7 @@ def test_evaluation_rejects_mismatched_checkpoint_before_touching_model_state(
         return model
 
     monkeypatch.setattr(evaluation, "build_model_from_config", recording_builder)
-    with pytest.raises(ValueError, match=r"checkpoint/config artifact mismatch"):
+    with pytest.raises(ValueError, match=r"checkpoint.*config.*branches"):
         evaluation._load_model(path, {"model": dict(TINY_MODEL_CONFIG)}, torch.device("cpu"))
 
     assert builder_calls == []
@@ -247,7 +288,7 @@ def test_train_resume_rejects_mismatched_checkpoint_before_loading_state(
     poisoned = {
         key: torch.zeros_like(value) for key, value in reference.state_dict().items()
     }
-    checkpoint_config = {**TINY_MODEL_CONFIG, "artifact_mode": "rgb_srm", "cnn_in_channels": 6}
+    checkpoint_config = {**TINY_MODEL_CONFIG, "enable_srm_branch": True, "enable_fft_branch": False}
     resume_path = tmp_path / "resume.pt"
     torch.save(
         {
@@ -265,7 +306,7 @@ def test_train_resume_rejects_mismatched_checkpoint_before_loading_state(
         "sys.argv",
         ["train.py", "--config", config_path, "--resume", str(resume_path)],
     )
-    with pytest.raises(ValueError, match=r"checkpoint/config artifact mismatch"):
+    with pytest.raises(ValueError, match=r"checkpoint.*config.*branches"):
         train.main()
 
     assert len(captured) == 1
@@ -312,8 +353,10 @@ def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata
     assert len(captured) == 1
     model, _ = captured[0]
     best = torch.load(output_dir / "best.pt", weights_only=False)
-    assert best["format_version"] == 3
-    assert best["architecture"] == "favit_lsda_cnn"
-    assert best["artifact_mode"] == model.artifact_mode
-    assert best["cnn_in_channels"] == model.cnn_in_channels
+    assert best["format_version"] == 4
+    assert best["architecture"] == "favit_lsda_multibranch"
+    assert best["enabled_branches"] == list(model.enabled_branches)
+    assert best["srm_backbone"] == model.srm_backbone_name
+    assert best["fft_backbone"] == model.fft_backbone_name
+    assert best["fusion"] == model.fusion_name
     assert best["celebdf_test_metrics"]["level"] == "video"

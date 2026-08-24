@@ -11,7 +11,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from favit_lsda.checkpoints import validate_checkpoint_artifacts
+from favit_lsda.checkpoints import model_branch_metadata, validate_checkpoint_branches
 from favit_lsda.config import (
     build_model_from_config,
     load_config,
@@ -81,19 +81,25 @@ def load_favit_initialization(model: torch.nn.Module, checkpoint_path: Path) -> 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     source = checkpoint.get("model", checkpoint)
     target = model.state_dict()
+    excluded_prefixes = (
+        "head.",
+        "srm_encoder.",
+        "fft_encoder.",
+        "late_fusion.",
+    )
     compatible = {
         key: value
         for key, value in source.items()
         if key in target
         and target[key].shape == value.shape
-        and not key.startswith("head.")
+        and not key.startswith(excluded_prefixes)
     }
     shape_mismatches = [
         key
         for key, value in source.items()
         if key in target
         and target[key].shape != value.shape
-        and not key.startswith("head.")
+        and not key.startswith(excluded_prefixes)
     ]
     if shape_mismatches:
         print(
@@ -315,7 +321,7 @@ def main() -> None:
     epochs_without_improvement = 0
     if resume_path is not None:
         checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
-        validate_checkpoint_artifacts(checkpoint, model_config, resume_path)
+        validate_checkpoint_branches(checkpoint, model_config, resume_path)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -406,8 +412,7 @@ def main() -> None:
             0 if improved else epochs_without_improvement + 1
         )
         state = {
-            "format_version": 3,
-            "architecture": "favit_lsda_cnn",
+            **model_branch_metadata(model),
             # Read off the model instance rather than the config-derived locals
             # so the persisted metadata is definitionally what the model is,
             # and cannot drift from it via a second resolution site.
