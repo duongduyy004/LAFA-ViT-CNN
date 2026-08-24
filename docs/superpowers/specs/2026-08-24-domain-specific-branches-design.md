@@ -1,6 +1,6 @@
 # Domain-Specific RGB, SRM, and FFT Branches Design
 
-**Status:** Approved in chat; pending review of this written specification  
+**Status:** Approved  
 **Date:** 2026-08-24
 
 ## Goal
