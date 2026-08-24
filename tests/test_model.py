@@ -22,14 +22,16 @@ class TinyProjectedForensicEncoder(nn.Module):
         return self.project(images.mean(dim=(-2, -1)))
 
 
-def _tiny_model(monkeypatch, *, enable_srm=False, enable_fft=False):
+def _tiny_model(
+    monkeypatch, *, enable_srm=False, enable_fft=False, forgery_methods=("DF", "F2F")
+):
     monkeypatch.setattr(
         model_module, "ProjectedForensicEncoder", TinyProjectedForensicEncoder
     )
     return create_favit_lsda(
         model_name="vit_tiny_patch16_224",
         pretrained=False,
-        forgery_methods=("DF", "F2F"),
+        forgery_methods=forgery_methods,
         train_backbone_norms=False,
         train_cls_token=False,
         enable_srm_branch=enable_srm,
@@ -115,7 +117,10 @@ def test_forward_mapping_returns_logits_and_features_without_teachers(monkeypatc
 )
 def test_forward_rejects_missing_or_unexpected_branch_keys(monkeypatch, bad_inputs):
     model = _tiny_model(monkeypatch)
-    with pytest.raises(ValueError, match="exactly enabled branches"):
+    with pytest.raises(
+        ValueError,
+        match=r"branch '(rgb|unexpected)'.*observed shape.*exactly enabled branches",
+    ):
         model(bad_inputs)
 
 
@@ -123,8 +128,60 @@ def test_forward_group_rejects_branch_geometry_mismatch_before_encoding(monkeypa
     model = _tiny_model(monkeypatch, enable_srm=True)
     inputs = _inputs(enable_srm=True)
     inputs["srm"] = torch.randn(1, 3, 3, 192, 224)
-    with pytest.raises(ValueError, match="matching group/domain/spatial geometry"):
+    with pytest.raises(ValueError, match=r"branch 'srm'.*observed shape.*rgb"):
         model.forward_group(inputs)
+
+
+def test_group_validation_accepts_five_domains(monkeypatch):
+    model = _tiny_model(
+        monkeypatch, forgery_methods=("DF", "F2F", "FS", "NT")
+    )
+    model._validate_inputs(
+        {"rgb": torch.randn(1, 5, 3, 224, 224)}, grouped=True
+    )
+
+
+def test_rgb_validation_diagnostics_include_branch_and_shape(monkeypatch):
+    model = _tiny_model(monkeypatch)
+    cases = [
+        torch.randn(1, 3, 224),
+        torch.randn(1, 1, 224, 224),
+        torch.full((1, 3, 224, 224), float("nan")),
+    ]
+    for value in cases:
+        with pytest.raises(ValueError, match=r"branch 'rgb'.*shape"):
+            model._validate_inputs({"rgb": value}, grouped=False)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        torch.randn(1, 3, 224),
+        torch.randn(1, 1, 224, 224),
+        torch.full((1, 3, 224, 224), float("inf")),
+    ],
+)
+def test_optional_validation_diagnostics_include_branch_and_shape(
+    monkeypatch, bad_value
+):
+    model = _tiny_model(monkeypatch, enable_srm=True)
+    inputs = OrderedDict(
+        rgb=torch.randn(1, 3, 224, 224),
+        srm=bad_value,
+    )
+    with pytest.raises(ValueError, match=r"branch 'srm'.*shape"):
+        model._validate_inputs(inputs, grouped=False)
+
+
+def test_geometry_diagnostic_names_offending_branch_and_shapes(monkeypatch):
+    model = _tiny_model(monkeypatch, enable_srm=True)
+    inputs = _inputs(enable_srm=True)
+    inputs["srm"] = torch.randn(1, 3, 3, 192, 224)
+    with pytest.raises(
+        ValueError,
+        match=r"branch 'srm'.*shape.*rgb.*shape",
+    ):
+        model._validate_inputs(inputs, grouped=True)
 
 
 def test_group_invariance_classifier_uses_rgb_features_only(monkeypatch):

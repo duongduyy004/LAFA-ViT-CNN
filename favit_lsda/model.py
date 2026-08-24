@@ -433,47 +433,59 @@ class ForgeryAwareLSDAViT(nn.Module):
     ) -> None:
         if not isinstance(inputs, Mapping):
             raise TypeError("inputs must be a mapping of branch names to tensors")
-        if set(inputs) != set(self.enabled_branches):
+        expected_branches = set(self.enabled_branches)
+        observed_branches = set(inputs)
+        if observed_branches != expected_branches:
+            missing = sorted(expected_branches - observed_branches)
+            unexpected = sorted(observed_branches - expected_branches)
+            branch = missing[0] if missing else unexpected[0]
+            value = inputs.get(branch)
+            observed_shape = (
+                tuple(value.shape)
+                if hasattr(value, "shape")
+                else "<missing>"
+            )
             raise ValueError(
-                "inputs must contain exactly enabled branches "
-                f"{self.enabled_branches}, got {tuple(inputs)}"
+                f"branch {branch!r} has invalid mapping entry: "
+                f"observed shape {observed_shape}; inputs must contain exactly "
+                f"enabled branches {self.enabled_branches}, got {tuple(inputs)}"
             )
         expected_rank = 5 if grouped else 4
-        reference = inputs["rgb"]
-        if reference.ndim != expected_rank:
-            raise ValueError(
-                f"branch inputs must be rank {expected_rank} tensors, "
-                f"got rgb rank {reference.ndim}"
-            )
-        if reference.shape[-(expected_rank - 1)] != 3:
-            raise ValueError("every branch input must have exactly three channels")
-        if not reference.is_floating_point() or not torch.isfinite(reference).all():
-            raise ValueError("every branch input must be finite floating point")
-        reference_geometry = reference.shape[:2] + reference.shape[-2:]
-        if grouped and reference.shape[1] != self.num_domains:
-            raise ValueError(
-                f"rgb grouped input must have {self.num_domains} domains, "
-                f"got {reference.shape[1]}"
-            )
+        channel_index = 2 if grouped else 1
+        reference_geometry: tuple[int, ...] | None = None
         for name in self.enabled_branches:
             value = inputs[name]
+            shape = tuple(value.shape)
             if value.ndim != expected_rank:
                 raise ValueError(
-                    f"branch {name!r} must be rank {expected_rank}, got {value.ndim}"
+                    f"branch {name!r} expected rank {expected_rank}, "
+                    f"observed shape {shape}"
                 )
-            if value.shape[-(expected_rank - 1)] != 3:
+            if value.shape[channel_index] != 3:
                 raise ValueError(
-                    f"branch {name!r} must have exactly three channels, "
-                    f"got {value.shape[-(expected_rank - 1)]}"
+                    f"branch {name!r} expected 3 channels, observed shape {shape}"
                 )
-            if not value.is_floating_point() or not torch.isfinite(value).all():
+            if not value.is_floating_point():
                 raise ValueError(
-                    f"branch {name!r} must be finite floating point"
+                    f"branch {name!r} expected floating-point values, "
+                    f"observed shape {shape} and dtype {value.dtype}"
+                )
+            if not torch.isfinite(value).all():
+                raise ValueError(
+                    f"branch {name!r} expected finite values, observed shape {shape}"
                 )
             geometry = value.shape[:2] + value.shape[-2:]
-            if geometry != reference_geometry:
+            if name == "rgb":
+                if grouped and value.shape[1] != self.num_domains:
+                    raise ValueError(
+                        f"branch 'rgb' expected {self.num_domains} domains, "
+                        f"observed shape {shape}"
+                    )
+                reference_geometry = geometry
+            elif geometry != reference_geometry:
                 raise ValueError(
-                    "branch inputs must have matching group/domain/spatial geometry"
+                    f"branch {name!r} geometry mismatch: observed shape {shape}; "
+                    f"branch 'rgb' observed shape {tuple(inputs['rgb'].shape)}"
                 )
 
     def _fused_features(
