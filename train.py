@@ -74,9 +74,8 @@ def restore_random_state(state: dict | None) -> None:
 def load_favit_initialization(model: torch.nn.Module, checkpoint_path: Path) -> int:
     """Load only matching name-and-shape FA-ViT tensors from a source checkpoint.
 
-    The classification head is always excluded so it stays freshly
-    initialized: CNN artifact branch, late fusion, and the binary head have
-    no counterpart worth transplanting from a FA-ViT-only source checkpoint.
+    Detector-specific heads, forensic encoders, and late fusion are excluded
+    because they have no counterpart worth transplanting from a FA-ViT source.
     """
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     source = checkpoint.get("model", checkpoint)
@@ -196,14 +195,33 @@ def main() -> None:
     if args.resume is not None and args.init_favit is not None:
         raise ValueError("--resume and --init-favit are mutually exclusive")
     config = load_config(args.config)
-    seed_everything(int(config.get("seed", 42)))
-    device = resolve_device(args.device or config.get("device", "cuda"))
     data_config = config["data"]
     model_config = config["model"]
     train_config = config["train"]
     loss_config = config["loss"]
     validate_model_config(model_config)
     branch_config = resolve_branch_config(model_config)
+
+    resume_value = args.resume or train_config.get("resume")
+    resume_path = Path(resume_value) if resume_value else None
+    init_value = args.init_favit or train_config.get("init_favit")
+    init_path = Path(init_value) if init_value else None
+    if resume_path is not None and init_path is not None:
+        raise ValueError("resume and FA-ViT initialization are mutually exclusive")
+    for path, name in ((resume_path, "resume"), (init_path, "FA-ViT initialization")):
+        if path is not None and not path.is_file():
+            raise FileNotFoundError(f"{name} checkpoint does not exist: {path}")
+    resume_checkpoint = None
+    if resume_path is not None:
+        resume_checkpoint = torch.load(
+            resume_path, map_location="cpu", weights_only=False
+        )
+        validate_checkpoint_branches(
+            resume_checkpoint, model_config, resume_path
+        )
+
+    seed_everything(int(config.get("seed", 42)))
+    device = resolve_device(args.device or config.get("device", "cuda"))
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "config.yaml").open("w", encoding="utf-8") as handle:
@@ -289,16 +307,6 @@ def main() -> None:
         else None
     )
 
-    resume_value = args.resume or train_config.get("resume")
-    resume_path = Path(resume_value) if resume_value else None
-    init_value = args.init_favit or train_config.get("init_favit")
-    init_path = Path(init_value) if init_value else None
-    if resume_path is not None and init_path is not None:
-        raise ValueError("resume and FA-ViT initialization are mutually exclusive")
-    for path, name in ((resume_path, "resume"), (init_path, "FA-ViT initialization")):
-        if path is not None and not path.is_file():
-            raise FileNotFoundError(f"{name} checkpoint does not exist: {path}")
-
     model = build_model_from_config(
         model_config, pretrained=False if resume_path or init_path else None
     )
@@ -320,8 +328,8 @@ def main() -> None:
     best_auc = float("-inf")
     epochs_without_improvement = 0
     if resume_path is not None:
-        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
-        validate_checkpoint_branches(checkpoint, model_config, resume_path)
+        checkpoint = resume_checkpoint
+        assert checkpoint is not None
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -451,7 +459,7 @@ def main() -> None:
         best_path = output_dir / "best.pt"
         if not best_path.is_file():
             raise FileNotFoundError("no best checkpoint is available for target evaluation")
-        best_state = torch.load(best_path, map_location=device, weights_only=False)
+        best_state = torch.load(best_path, map_location="cpu", weights_only=False)
         model.load_state_dict(best_state["model"])
         target_metrics = evaluate_at_level(
             model, target_loader, device, description="final test CelebDF"

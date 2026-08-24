@@ -46,7 +46,7 @@ def _load_model(
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"checkpoint does not exist: {checkpoint_path}")
     checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=False
+        checkpoint_path, map_location="cpu", weights_only=False
     )
     # Validate against the user-supplied --config, never against the config the
     # checkpoint carries: comparing the checkpoint's metadata to its own
@@ -61,9 +61,9 @@ def _load_model(
     # top-level fields is still caught before construction.
     model_config = checkpoint.get("config", config)["model"]
     validate_checkpoint_branches(checkpoint, model_config, checkpoint_path)
-    model = build_model_from_config(model_config, pretrained=False).to(device)
+    model = build_model_from_config(model_config, pretrained=False)
     model.load_state_dict(checkpoint["model"], strict=True)
-    return model
+    return model.to(device)
 
 
 def _resolve_manifest(

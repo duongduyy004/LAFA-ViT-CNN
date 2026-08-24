@@ -33,6 +33,19 @@ def test_branch_config_enables_both_forensic_paths():
     assert value.enabled_branches == ("rgb", "srm", "fft")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("enable_srm_branch", "false"),
+        ("enable_fft_branch", "true"),
+        ("forensic_pretrained", "false"),
+    ],
+)
+def test_branch_config_rejects_non_boolean_toggles(field, value):
+    with pytest.raises(ValueError, match=rf"{field}.*boolean"):
+        resolve_branch_config({field: value})
+
+
 @pytest.mark.parametrize("key", ["artifact_mode", "cnn_in_channels"])
 def test_legacy_artifact_fields_are_rejected(key):
     with pytest.raises(ValueError, match=rf"obsolete.*{key}"):

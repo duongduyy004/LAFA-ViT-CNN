@@ -105,7 +105,10 @@ def test_disabled_builders_are_not_called(monkeypatch):
 
 
 def test_transform_returns_mapping_after_augmentation():
-    inputs = FaceTransform(32, enable_srm=True, enable_fft=True)(
+    transform = FaceTransform(32, enable_srm=True, enable_fft=True)
+    assert transform.expected_branches == ("rgb", "srm", "fft")
+    assert transform.expected_spatial_size == (32, 32)
+    inputs = transform(
         Image.new("RGB", (40, 36), "red")
     )
     assert {name: value.shape for name, value in inputs.items()} == {
@@ -132,6 +135,96 @@ def test_domain_shift_transform_preserves_shape_and_range():
     assert tensor.shape == (3, 64, 64)
     assert torch.isfinite(tensor).all()
     assert -1.0 <= tensor.min() <= tensor.max() <= 1.0
+
+
+class _ExplicitTransform:
+    expected_branches = ("rgb", "srm")
+    expected_spatial_size = (32, 32)
+
+    def __init__(self, output):
+        self.output = output
+
+    def __call__(self, _image, *args, **kwargs):
+        return self.output
+
+    def sample_flip(self):
+        return False
+
+    def sample_crop(self):
+        return (1.0, 0.0, 0.0)
+
+
+def _write_frame_manifest(tmp_path):
+    Image.new("RGB", (20, 20), "white").save(tmp_path / "face.jpg")
+    manifest = tmp_path / "frames.csv"
+    with manifest.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["path", "label", "video_id"])
+        writer.writeheader()
+        writer.writerow({"path": "face.jpg", "label": "1", "video_id": "video"})
+    return manifest
+
+
+def test_dataset_rejects_custom_transform_without_explicit_contract(tmp_path):
+    class UndeclaredTransform:
+        def __call__(self, _image, *args, **kwargs):
+            return {"rgb": torch.zeros(3, 32, 32)}
+
+    manifest = _write_frame_manifest(tmp_path)
+    with pytest.raises(ValueError, match=r"transform.*expected_branches"):
+        FrameFaceDataset(manifest, tmp_path, UndeclaredTransform())
+
+
+def test_frame_dataset_accepts_custom_transform_with_explicit_contract(tmp_path):
+    manifest = _write_frame_manifest(tmp_path)
+    expected = {
+        "rgb": torch.zeros(3, 32, 32),
+        "srm": torch.ones(3, 32, 32),
+    }
+    inputs, label, video_id = FrameFaceDataset(
+        manifest, tmp_path, _ExplicitTransform(expected)
+    )[0]
+    assert tuple(inputs) == ("rgb", "srm")
+    assert torch.equal(inputs["rgb"], expected["rgb"])
+    assert torch.equal(inputs["srm"], expected["srm"])
+    assert (label, video_id) == (1, "video")
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (
+            {"rgb": torch.zeros(3, 32, 32), "fft": torch.zeros(3, 32, 32)},
+            r"face\.jpg.*expected branches.*rgb.*srm.*rgb.*fft",
+        ),
+        (
+            {"rgb": torch.zeros(1, 32, 32), "srm": torch.zeros(3, 32, 32)},
+            r"face\.jpg.*branch 'rgb'.*observed shape \(1, 32, 32\)",
+        ),
+        (
+            {
+                "rgb": torch.zeros(3, 32, 32, dtype=torch.uint8),
+                "srm": torch.zeros(3, 32, 32),
+            },
+            r"face\.jpg.*branch 'rgb'.*dtype torch\.uint8",
+        ),
+        (
+            {
+                "rgb": torch.zeros(3, 32, 32),
+                "srm": torch.full((3, 32, 32), float("nan")),
+            },
+            r"face\.jpg.*branch 'srm'.*finite",
+        ),
+        (
+            {"rgb": torch.zeros(3, 31, 32), "srm": torch.zeros(3, 31, 32)},
+            r"face\.jpg.*branch 'rgb'.*observed shape \(3, 31, 32\).*3, 32, 32",
+        ),
+    ],
+)
+def test_frame_dataset_rejects_malformed_transform_output(tmp_path, output, message):
+    manifest = _write_frame_manifest(tmp_path)
+    dataset = FrameFaceDataset(manifest, tmp_path, _ExplicitTransform(output))
+    with pytest.raises(ValueError, match=message):
+        dataset[0]
 
 
 def _write_group_manifest(tmp_path):
@@ -180,6 +273,22 @@ def test_grouped_dataset_returns_branch_inputs_and_shared_group_geometry(tmp_pat
     assert torch.equal(labels, torch.tensor([0, 1, 2]))
 
 
+def test_grouped_dataset_rejects_branch_geometry_outside_transform_contract(tmp_path):
+    manifest, methods = _write_group_manifest(tmp_path)
+    transform = _ExplicitTransform(
+        {
+            "rgb": torch.zeros(3, 32, 32),
+            "srm": torch.zeros(3, 16, 32),
+        }
+    )
+    dataset = GroupedForgeryDataset(manifest, tmp_path, transform, methods)
+    with pytest.raises(
+        ValueError,
+        match=r"real\.jpg.*branch 'srm'.*observed shape \(3, 16, 32\).*3, 32, 32",
+    ):
+        dataset[0]
+
+
 def test_artifact_flags_do_not_change_augmented_rgb_rng_sequence(tmp_path):
     manifest, methods = _write_group_manifest(tmp_path)
     random.seed(11)
@@ -210,12 +319,7 @@ def test_artifact_flags_do_not_change_augmented_rgb_rng_sequence(tmp_path):
 
 
 def test_frame_dataset_returns_branch_inputs_label_and_video_id(tmp_path):
-    Image.new("RGB", (20, 20), "white").save(tmp_path / "face.jpg")
-    manifest = tmp_path / "frames.csv"
-    with manifest.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["path", "label", "video_id"])
-        writer.writeheader()
-        writer.writerow({"path": "face.jpg", "label": "1", "video_id": "video"})
+    manifest = _write_frame_manifest(tmp_path)
     inputs, label, video_id = FrameFaceDataset(
         manifest, tmp_path, FaceTransform(32, enable_srm=True)
     )[0]

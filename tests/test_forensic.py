@@ -1,31 +1,6 @@
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
-
-
-def _install_data_import_compatibility():
-    """Load migrated data.py and bridge the legacy model import in-process."""
-    if "favit_lsda" in sys.modules:
-        return
-    data_path = Path(__file__).parents[1] / "favit_lsda" / "data.py"
-    spec = importlib.util.spec_from_file_location("favit_lsda.data", data_path)
-    data_module = importlib.util.module_from_spec(spec)
-    sys.modules["favit_lsda.data"] = data_module
-    spec.loader.exec_module(data_module)
-    if not hasattr(data_module, "artifact_channels"):
-        data_module.artifact_channels = lambda mode: {
-            "rgb": 3,
-            "rgb_srm": 6,
-            "rgb_fft": 6,
-            "rgb_srm_fft": 9,
-        }[mode]
-
-
-_install_data_import_compatibility()
 
 from favit_lsda.forensic import ProjectedForensicEncoder
 

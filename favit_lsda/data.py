@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import random
+from collections.abc import Mapping
 from collections import defaultdict
 from pathlib import Path
 
@@ -122,6 +123,12 @@ class FaceTransform:
         self.jpeg_quality_min = int(jpeg_quality_min)
         self.enable_srm = bool(enable_srm)
         self.enable_fft = bool(enable_fft)
+        self.expected_branches = (
+            "rgb",
+            *(("srm",) if self.enable_srm else ()),
+            *(("fft",) if self.enable_fft else ()),
+        )
+        self.expected_spatial_size = (self.image_size, self.image_size)
         probabilities = (
             horizontal_flip,
             grayscale_probability,
@@ -242,6 +249,83 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _transform_contract(transform) -> tuple[tuple[str, ...], tuple[int, int]]:
+    branches = getattr(transform, "expected_branches", None)
+    spatial_size = getattr(transform, "expected_spatial_size", None)
+    if not isinstance(branches, (tuple, list)):
+        raise ValueError(
+            "transform must expose expected_branches as explicit branch metadata"
+        )
+    branches = tuple(branches)
+    canonical = tuple(
+        name for name in ("rgb", "srm", "fft") if name in branches
+    )
+    if not branches or branches != canonical:
+        raise ValueError(
+            "transform expected_branches must be a canonical subset beginning "
+            f"with 'rgb', got {branches!r}"
+        )
+    if (
+        not isinstance(spatial_size, (tuple, list))
+        or len(spatial_size) != 2
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in spatial_size
+        )
+    ):
+        raise ValueError(
+            "transform must expose expected_spatial_size as two positive integers"
+        )
+    return branches, (spatial_size[0], spatial_size[1])
+
+
+def _validate_transform_output(
+    output,
+    expected_branches: tuple[str, ...],
+    expected_spatial_size: tuple[int, int],
+    sample_path: Path,
+) -> dict[str, Tensor]:
+    if not isinstance(output, Mapping):
+        raise ValueError(
+            f"transform output for {sample_path}: expected a branch mapping, "
+            f"got {type(output).__name__}"
+        )
+    observed_branches = tuple(output)
+    if observed_branches != expected_branches:
+        raise ValueError(
+            f"transform output for {sample_path}: expected branches "
+            f"{expected_branches}, got {observed_branches}"
+        )
+    expected_shape = (3, *expected_spatial_size)
+    for name in expected_branches:
+        value = output[name]
+        if not isinstance(value, Tensor):
+            raise ValueError(
+                f"transform output for {sample_path}: branch {name!r} observed "
+                f"shape <not a tensor> and dtype {type(value).__name__}; expected "
+                f"finite floating tensor {list(expected_shape)}"
+            )
+        shape = tuple(value.shape)
+        if shape != expected_shape:
+            raise ValueError(
+                f"transform output for {sample_path}: branch {name!r} observed "
+                f"shape {shape} and dtype {value.dtype}; expected finite floating "
+                f"tensor {list(expected_shape)}"
+            )
+        if not value.is_floating_point():
+            raise ValueError(
+                f"transform output for {sample_path}: branch {name!r} observed "
+                f"shape {shape} and dtype {value.dtype}; expected finite floating "
+                f"tensor {list(expected_shape)}"
+            )
+        if not torch.isfinite(value).all():
+            raise ValueError(
+                f"transform output for {sample_path}: branch {name!r} must be "
+                f"finite; observed shape {shape} and dtype {value.dtype}"
+            )
+    return dict(output)
+
+
 class GroupedForgeryDataset(Dataset[tuple[dict[str, Tensor], Tensor]]):
     """Build LSDA groups in canonical order: real, then each forgery method."""
 
@@ -265,6 +349,9 @@ class GroupedForgeryDataset(Dataset[tuple[dict[str, Tensor], Tensor]]):
             raise ValueError(f"LSDA manifest is missing columns: {sorted(missing)}")
         self.data_root = Path(data_root)
         self.transform = transform
+        self.expected_branches, self.expected_spatial_size = _transform_contract(
+            transform
+        )
         self.forgery_methods = tuple(forgery_methods)
         canonical = {method.casefold(): method for method in self.forgery_methods}
         grouped: dict[str, dict[str, list[dict[str, str]]]] = defaultdict(
@@ -305,12 +392,19 @@ class GroupedForgeryDataset(Dataset[tuple[dict[str, Tensor], Tensor]]):
             self.transform(image, flip, crop, fake_source)
             for image, fake_source in selected_fakes
         ]
-        keys = tuple(samples[0])
-        if any(tuple(sample) != keys for sample in samples[1:]):
-            raise ValueError("inconsistent branch keys within LSDA group")
+        sample_paths = [real_source, *(source for _, source in selected_fakes)]
+        samples = [
+            _validate_transform_output(
+                sample,
+                self.expected_branches,
+                self.expected_spatial_size,
+                sample_path,
+            )
+            for sample, sample_path in zip(samples, sample_paths)
+        ]
         inputs = {
             name: torch.stack([sample[name] for sample in samples])
-            for name in keys
+            for name in self.expected_branches
         }
         domain_labels = torch.arange(len(self.forgery_methods) + 1, dtype=torch.long)
         return inputs, domain_labels
@@ -328,6 +422,9 @@ class FrameFaceDataset(Dataset[tuple[dict[str, Tensor], int, str]]):
             raise ValueError(f"frame manifest is missing columns: {sorted(missing)}")
         self.data_root = Path(data_root)
         self.transform = transform
+        self.expected_branches, self.expected_spatial_size = _transform_contract(
+            transform
+        )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -337,4 +434,10 @@ class FrameFaceDataset(Dataset[tuple[dict[str, Tensor], int, str]]):
         source = _resolve(self.data_root, row["path"])
         with Image.open(source) as image:
             branch_inputs = self.transform(image.copy(), sample_path=source)
+        branch_inputs = _validate_transform_output(
+            branch_inputs,
+            self.expected_branches,
+            self.expected_spatial_size,
+            source,
+        )
         return branch_inputs, int(row["label"]), row["video_id"]

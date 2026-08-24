@@ -27,6 +27,13 @@ class BranchConfig:
         )
 
 
+def _boolean_toggle(model_config: dict[str, Any], field: str, default: bool) -> bool:
+    value = model_config.get(field, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"model.{field} must be a boolean, got {value!r}")
+    return value
+
+
 def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
     legacy = sorted({"artifact_mode", "cnn_in_channels"} & model_config.keys())
     if legacy:
@@ -35,13 +42,15 @@ def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
             "enable_fft_branch"
         )
     value = BranchConfig(
-        enable_srm=bool(model_config.get("enable_srm_branch", False)),
-        enable_fft=bool(model_config.get("enable_fft_branch", False)),
+        enable_srm=_boolean_toggle(model_config, "enable_srm_branch", False),
+        enable_fft=_boolean_toggle(model_config, "enable_fft_branch", False),
         srm_backbone=str(model_config.get("srm_backbone", "xception")),
         fft_backbone=str(
             model_config.get("fft_backbone", "mobilenetv3_small_100")
         ),
-        forensic_pretrained=bool(model_config.get("forensic_pretrained", True)),
+        forensic_pretrained=_boolean_toggle(
+            model_config, "forensic_pretrained", True
+        ),
     )
     if value.srm_backbone != "xception":
         raise ValueError(f"unsupported srm_backbone: {value.srm_backbone!r}")

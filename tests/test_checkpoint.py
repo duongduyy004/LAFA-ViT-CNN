@@ -33,10 +33,7 @@ def test_checkpoint_is_atomic(tmp_path):
 
 def test_favit_initialization_loads_only_compatible_tensors(tmp_path):
     model = torch.nn.Sequential(torch.nn.Linear(3, 2), torch.nn.Linear(2, 1))
-    model.artifact_cnn = torch.nn.Module()
-    model.artifact_cnn.stem = torch.nn.Sequential(torch.nn.Linear(4, 4))
     original = model[0].weight.detach().clone()
-    original_cnn_weight = model.artifact_cnn.stem[0].weight.detach().clone()
     checkpoint = {
         "model": {
             "0.weight": torch.full_like(model[0].weight, 7.0),
@@ -49,10 +46,6 @@ def test_favit_initialization_loads_only_compatible_tensors(tmp_path):
     assert load_favit_initialization(model, path) == 1
     assert not torch.equal(model[0].weight, original)
     assert torch.equal(model[0].weight, torch.full_like(model[0].weight, 7.0))
-    # The CNN artifact branch has no counterpart in a FA-ViT-only source
-    # checkpoint, so it must stay freshly initialized rather than being
-    # partially/incorrectly loaded.
-    assert torch.equal(model.artifact_cnn.stem[0].weight, original_cnn_weight)
 
 
 def test_favit_initialization_excludes_head_even_when_shape_matches(tmp_path):
@@ -226,6 +219,46 @@ def test_evaluation_rejects_mismatched_checkpoint_before_touching_model_state(
         assert torch.equal(value, snapshot[key])
 
 
+def test_evaluation_deserializes_and_loads_on_cpu_before_moving_model(
+    tmp_path, monkeypatch
+):
+    """Catches checkpoint tensors being materialized on the accelerator."""
+    from favit_lsda import evaluation
+
+    path = tmp_path / "best.pt"
+    path.write_bytes(b"checkpoint placeholder")
+    checkpoint = _tiny_checkpoint(TINY_MODEL_CONFIG)
+    load_calls = []
+    events = []
+
+    def fake_load(checkpoint_path, **kwargs):
+        load_calls.append((checkpoint_path, kwargs))
+        return checkpoint
+
+    class RecordingModel:
+        def load_state_dict(self, state, strict):
+            events.append(("load_state_dict", state, strict))
+
+        def to(self, device):
+            events.append(("to", device))
+            return self
+
+    monkeypatch.setattr(evaluation.torch, "load", fake_load)
+    monkeypatch.setattr(
+        evaluation, "build_model_from_config", lambda *_args, **_kwargs: RecordingModel()
+    )
+
+    evaluation._load_model(path, {"model": TINY_MODEL_CONFIG}, torch.device("cpu"))
+
+    assert load_calls == [
+        (path, {"map_location": "cpu", "weights_only": False})
+    ]
+    assert events == [
+        ("load_state_dict", {}, True),
+        ("to", torch.device("cpu")),
+    ]
+
+
 def _write_train_fixture(tmp_path, epochs: int = 2, **extra_data) -> tuple[str, dict]:
     """Write a runnable tiny train config with real images and manifests."""
     for name in ("real_a.jpg", "real_b.jpg"):
@@ -301,44 +334,74 @@ def _record_train_models(monkeypatch) -> list[tuple[torch.nn.Module, dict]]:
     return captured
 
 
-def test_train_resume_rejects_mismatched_checkpoint_before_loading_state(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("legacy", [False, True], ids=("branch-mismatch", "v3"))
+def test_train_resume_rejects_checkpoint_before_builders_or_output_side_effects(
+    tmp_path, monkeypatch, legacy
 ):
-    """Catches --resume loading a wrong-mode checkpoint's weights before validating."""
+    """Catches resume compatibility checks occurring after startup side effects."""
     config_path, _ = _write_train_fixture(tmp_path)
-
-    reference = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
-    poisoned = {
-        key: torch.zeros_like(value) for key, value in reference.state_dict().items()
-    }
-    checkpoint_config = {**TINY_MODEL_CONFIG, "enable_srm_branch": True, "enable_fft_branch": False}
     resume_path = tmp_path / "resume.pt"
-    torch.save(
-        {
-            **_tiny_checkpoint(checkpoint_config, poisoned),
-            "epoch": 0,
-            "optimizer": {},
-            "scheduler": {},
-            "scaler": None,
-        },
-        resume_path,
+    checkpoint = (
+        {"format_version": 3, "architecture": "favit_lsda_cnn"}
+        if legacy
+        else _tiny_checkpoint(
+            {
+                **TINY_MODEL_CONFIG,
+                "enable_srm_branch": True,
+                "enable_fft_branch": False,
+            }
+        )
     )
+    torch.save(checkpoint, resume_path)
 
-    captured = _record_train_models(monkeypatch)
+    builder_calls = []
+    real_grouped_dataset = train.GroupedForgeryDataset
+    real_frame_dataset = train.FrameFaceDataset
+    real_model_builder = train.build_model_from_config
+    real_optimizer_builder = train.build_optimizer
+
+    def record(name, function):
+        def wrapper(*args, **kwargs):
+            builder_calls.append(name)
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        train, "GroupedForgeryDataset", record("grouped_dataset", real_grouped_dataset)
+    )
+    monkeypatch.setattr(
+        train, "FrameFaceDataset", record("frame_dataset", real_frame_dataset)
+    )
+    monkeypatch.setattr(
+        train, "build_model_from_config", record("model", real_model_builder)
+    )
+    monkeypatch.setattr(
+        train, "build_optimizer", record("optimizer", real_optimizer_builder)
+    )
+    real_torch_load = train.torch.load
+    load_calls = []
+
+    def recording_load(path, **kwargs):
+        load_calls.append((path, kwargs.get("map_location")))
+        return real_torch_load(path, **kwargs)
+
+    monkeypatch.setattr(train.torch, "load", recording_load)
     monkeypatch.setattr(
         "sys.argv",
         ["train.py", "--config", config_path, "--resume", str(resume_path)],
     )
-    with pytest.raises(ValueError, match=r"checkpoint.*config.*branches"):
+    expected_error = (
+        r"legacy.*format_version 3"
+        if legacy
+        else r"checkpoint.*config.*branches"
+    )
+    with pytest.raises(ValueError, match=expected_error):
         train.main()
 
-    assert len(captured) == 1
-    model, snapshot = captured[0]
-    # Non-vacuous: the rejected checkpoint is all zeros, so a load that slipped
-    # through ahead of validation would be visible in this comparison.
-    assert any(value.abs().sum() > 0 for value in snapshot.values())
-    for key, value in model.state_dict().items():
-        assert torch.equal(value, snapshot[key])
+    assert load_calls == [(resume_path, "cpu")]
+    assert builder_calls == []
+    assert not (tmp_path / "out").exists()
 
 
 def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata(
