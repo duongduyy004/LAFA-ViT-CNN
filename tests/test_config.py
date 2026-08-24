@@ -1,6 +1,12 @@
+from pathlib import Path
+
 import pytest
 
-from favit_lsda.config import resolve_branch_config, validate_model_config
+from favit_lsda.config import (
+    load_config,
+    resolve_branch_config,
+    validate_model_config,
+)
 
 
 def test_branch_config_defaults_to_rgb_only():
@@ -31,3 +37,23 @@ def test_legacy_artifact_fields_are_rejected(key):
 def test_unsupported_backbones_are_rejected(field, value):
     with pytest.raises(ValueError, match=rf"{field}.*{value}"):
         validate_model_config({field: value})
+
+
+@pytest.mark.parametrize(
+    ("name", "srm", "fft"),
+    [
+        ("rgb", False, False),
+        ("rgb_srm", True, False),
+        ("rgb_fft", False, True),
+        ("rgb_srm_fft", True, True),
+    ],
+)
+def test_experiment_config_has_exact_branches(name, srm, fft):
+    config = load_config(Path("configs") / f"favit_lsda_{name}.yaml")
+    validate_model_config(config["model"])
+    assert config["model"]["enable_srm_branch"] is srm
+    assert config["model"]["enable_fft_branch"] is fft
+    assert config["model"]["srm_backbone"] == "xception"
+    assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
+    assert config["model"]["forensic_pretrained"] is True
+    assert config["output_dir"] == f"outputs/favit_lsda_{name}"

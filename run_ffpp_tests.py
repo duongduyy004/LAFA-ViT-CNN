@@ -12,12 +12,10 @@ DEFAULT_MANIFEST = (
 )
 
 CASES = [
-    "favit_lsda_cnn_rgb.yaml",
-    "favit_lsda_cnn_rgb_srm.yaml",
-    "favit_lsda_cnn_rgb_fft.yaml",
-    "favit_lsda_cnn_rgb_wavelet.yaml",
-    "favit_lsda_cnn_rgb_srm_fft.yaml",
-    "favit_lsda_cnn_rgb_srm_wavelet.yaml",
+    "favit_lsda_rgb.yaml",
+    "favit_lsda_rgb_srm.yaml",
+    "favit_lsda_rgb_fft.yaml",
+    "favit_lsda_rgb_srm_fft.yaml",
 ]
 
 

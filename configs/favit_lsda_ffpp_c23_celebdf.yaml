@@ -44,6 +44,11 @@ model:
   # Adapt only the final semantic layers, at the smaller LR configured below.
   unfreeze_last_blocks: 2
   domain_adversarial_strength: 1.0
+  enable_srm_branch: false
+  enable_fft_branch: false
+  srm_backbone: xception
+  fft_backbone: mobilenetv3_small_100
+  forensic_pretrained: true
 
 loss:
   # The binary loss is class-balanced: one real and four fakes no longer imply 1:4.
