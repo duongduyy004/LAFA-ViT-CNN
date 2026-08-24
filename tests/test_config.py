@@ -1,40 +1,33 @@
-from pathlib import Path
-
 import pytest
 
-from favit_lsda.config import load_config, validate_model_config
+from favit_lsda.config import resolve_branch_config, validate_model_config
+
+
+def test_branch_config_defaults_to_rgb_only():
+    value = resolve_branch_config({})
+    assert value.enabled_branches == ("rgb",)
+    assert value.srm_backbone == "xception"
+    assert value.fft_backbone == "mobilenetv3_small_100"
+    assert value.forensic_pretrained is True
+
+
+def test_branch_config_enables_both_forensic_paths():
+    value = resolve_branch_config(
+        {"enable_srm_branch": True, "enable_fft_branch": True}
+    )
+    assert value.enabled_branches == ("rgb", "srm", "fft")
+
+
+@pytest.mark.parametrize("key", ["artifact_mode", "cnn_in_channels"])
+def test_legacy_artifact_fields_are_rejected(key):
+    with pytest.raises(ValueError, match=rf"obsolete.*{key}"):
+        validate_model_config({key: "legacy"})
 
 
 @pytest.mark.parametrize(
-    ("name", "mode", "channels"),
-    [
-        ("rgb", "rgb", 3), ("rgb_srm", "rgb_srm", 6),
-        ("rgb_fft", "rgb_fft", 6), ("rgb_wavelet", "rgb_wavelet", 6),
-        ("rgb_srm_fft", "rgb_srm_fft", 9),
-        ("rgb_srm_wavelet", "rgb_srm_wavelet", 9),
-    ],
+    ("field", "value"),
+    [("srm_backbone", "resnet50"), ("fft_backbone", "freqnet")],
 )
-def test_cnn_experiment_config_has_exact_mapping(name, mode, channels):
-    config = load_config(Path("configs") / f"favit_lsda_cnn_{name}.yaml")
-    validate_model_config(config["model"])
-    assert config["model"]["artifact_mode"] == mode
-    assert config["model"]["cnn_in_channels"] == channels
-    assert config["output_dir"] == f"outputs/favit_lsda_cnn_{name}"
-    assert config["data"]["validation_frames"].endswith("ffpp_c23_val_frames.csv")
-
-
-def test_model_config_rejects_artifact_width_mismatch():
-    with pytest.raises(ValueError, match=r"rgb_srm.*expects 6.*got 3"):
-        validate_model_config({"artifact_mode": "rgb_srm", "cnn_in_channels": 3})
-
-
-def test_model_config_accepts_matching_width():
-    validate_model_config({"artifact_mode": "rgb_srm_wavelet", "cnn_in_channels": 9})
-
-
-def test_model_config_defaults_channels_from_mode_when_unset():
-    validate_model_config({"artifact_mode": "rgb_fft"})
-
-
-def test_model_config_defaults_to_rgb_when_mode_unset():
-    validate_model_config({})
+def test_unsupported_backbones_are_rejected(field, value):
+    with pytest.raises(ValueError, match=rf"{field}.*{value}"):
+        validate_model_config({field: value})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import random
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,46 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
+
+
+@dataclass(frozen=True)
+class BranchConfig:
+    enable_srm: bool
+    enable_fft: bool
+    srm_backbone: str
+    fft_backbone: str
+    forensic_pretrained: bool
+
+    @property
+    def enabled_branches(self) -> tuple[str, ...]:
+        return (
+            "rgb",
+            *(("srm",) if self.enable_srm else ()),
+            *(("fft",) if self.enable_fft else ()),
+        )
+
+
+def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
+    legacy = sorted({"artifact_mode", "cnn_in_channels"} & model_config.keys())
+    if legacy:
+        raise ValueError(
+            f"obsolete model field(s) {legacy}; use enable_srm_branch and "
+            "enable_fft_branch"
+        )
+    value = BranchConfig(
+        enable_srm=bool(model_config.get("enable_srm_branch", False)),
+        enable_fft=bool(model_config.get("enable_fft_branch", False)),
+        srm_backbone=str(model_config.get("srm_backbone", "xception")),
+        fft_backbone=str(
+            model_config.get("fft_backbone", "mobilenetv3_small_100")
+        ),
+        forensic_pretrained=bool(model_config.get("forensic_pretrained", True)),
+    )
+    if value.srm_backbone != "xception":
+        raise ValueError(f"unsupported srm_backbone: {value.srm_backbone!r}")
+    if value.fft_backbone != "mobilenetv3_small_100":
+        raise ValueError(f"unsupported fft_backbone: {value.fft_backbone!r}")
+    return value
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -32,26 +73,21 @@ def resolve_device(requested: str) -> torch.device:
 
 
 def validate_model_config(model_config: dict[str, Any]) -> None:
-    from .data import artifact_channels, resolve_artifact_config
-
-    mode, actual = resolve_artifact_config(model_config)
-    expected = artifact_channels(mode)
-    if actual != expected:
-        raise ValueError(
-            f"artifact mode/channel mismatch: mode={mode!r} expects {expected}, got {actual}"
-        )
+    resolve_branch_config(model_config)
 
 
 def build_model_from_config(model_config: dict[str, Any], pretrained: bool | None = None):
-    from .data import resolve_artifact_config
     from .model import create_favit_lsda
 
-    validate_model_config(model_config)
-    artifact_mode, cnn_in_channels = resolve_artifact_config(model_config)
+    branch_config = resolve_branch_config(model_config)
+    encoder_pretrained = model_config.get("pretrained", True) if pretrained is None else pretrained
+    forensic_pretrained = branch_config.forensic_pretrained
+    if pretrained is False:
+        forensic_pretrained = False
 
     return create_favit_lsda(
         model_name=model_config["backbone"],
-        pretrained=model_config.get("pretrained", True) if pretrained is None else pretrained,
+        pretrained=encoder_pretrained,
         num_classes=model_config.get("num_classes", 2),
         forgery_methods=model_config.get(
             "forgery_methods",
@@ -80,6 +116,9 @@ def build_model_from_config(model_config: dict[str, Any], pretrained: bool | Non
         domain_adversarial_strength=model_config.get(
             "domain_adversarial_strength", 1.0
         ),
-        artifact_mode=artifact_mode,
-        cnn_in_channels=cnn_in_channels,
+        enable_srm_branch=branch_config.enable_srm,
+        enable_fft_branch=branch_config.enable_fft,
+        srm_backbone=branch_config.srm_backbone,
+        fft_backbone=branch_config.fft_backbone,
+        forensic_pretrained=forensic_pretrained,
     )
