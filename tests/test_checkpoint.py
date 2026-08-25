@@ -549,3 +549,56 @@ def test_train_round_trip_carries_the_rgb_cnn_branch(tmp_path, monkeypatch):
     reloaded = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
     reloaded.load_state_dict(best["model"])
     assert reloaded.late_fusion[0].in_features == reloaded.embed_dim * 4
+
+
+def _history_records(output_dir) -> list[dict]:
+    path = Path(output_dir) / "history.jsonl"
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def test_history_records_the_best_model_with_its_target_metrics(tmp_path, monkeypatch):
+    """History must name the selected epoch, not just the per-epoch stream.
+
+    Without this record the file says which epochs happened but never which one
+    ``best.pt`` actually holds, so a finished run cannot be read back.
+    """
+    config_path, config = _write_train_fixture(
+        tmp_path, epochs=2, celebdf_test_frames=True
+    )
+    monkeypatch.setattr("sys.argv", ["train.py", "--config", config_path])
+    train.main()
+
+    records = _history_records(config["output_dir"])
+    best = [record for record in records if record.get("event") == "best_model"]
+    assert len(best) == 1
+    best = best[0]
+
+    epochs = [record for record in records if "epoch" in record and "train" in record]
+    selected = [
+        record for record in epochs if record["epoch"] == best["epoch"]
+    ]
+    assert len(selected) == 1
+    assert best["selection_name"] == "validation"
+    assert best["selection_metrics"] == selected[0]["validation"]
+    assert best["best_selection_auc"] == max(
+        record["validation"]["auc"] for record in epochs
+    )
+    assert best["celebdf_test"]["level"] == "video"
+    assert best["checkpoint"] == "best.pt"
+
+
+def test_best_model_record_is_written_without_a_target_dataset(tmp_path, monkeypatch):
+    """Catches the record being emitted only from the target-evaluation branch."""
+    config_path, config = _write_train_fixture(tmp_path, epochs=1)
+    monkeypatch.setattr("sys.argv", ["train.py", "--config", config_path])
+    train.main()
+
+    records = _history_records(config["output_dir"])
+    assert not [r for r in records if r.get("event") == "final_target_evaluation"]
+    best = [record for record in records if record.get("event") == "best_model"]
+    assert len(best) == 1
+    assert best[0]["epoch"] == 1
+    assert best[0]["celebdf_test"] is None

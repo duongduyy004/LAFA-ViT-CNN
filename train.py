@@ -43,6 +43,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def append_history(path: Path, record: dict) -> None:
+    """Print a run record and append it to the JSONL history."""
+    print(json.dumps(record, indent=2))
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 def save_checkpoint(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -348,6 +355,8 @@ def main() -> None:
         print(f"resume_checkpoint: path={resume_path} next_epoch={start_epoch + 1}")
 
     history_path = output_dir / "history.jsonl"
+    best_record: dict | None = None
+    target_metrics = None
     for epoch in range(start_epoch, int(train_config["epochs"])):
         lsda_warmup = int(loss_config.get("lsda_warmup_epochs", 0))
         lsda_ramp = int(loss_config.get("lsda_ramp_epochs", 0))
@@ -412,9 +421,7 @@ def main() -> None:
             "train": train_metrics,
             selection_name: selection_metrics,
         }
-        print(json.dumps(record, indent=2))
-        with history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        append_history(history_path, record)
 
         current_auc = float(selection_metrics["auc"])
         scheduler.step()
@@ -444,6 +451,14 @@ def main() -> None:
         }
         if improved:
             save_checkpoint(output_dir / "best.pt", state)
+            best_record = {
+                "event": "best_model",
+                "epoch": epoch + 1,
+                "selection_name": selection_name,
+                "selection_metrics": selection_metrics,
+                "best_selection_auc": best_auc,
+                "checkpoint": "best.pt",
+            }
             print(
                 f"save_best_checkpoint: epoch={epoch + 1} "
                 f"{selection_name}_auc={current_auc:.6f}"
@@ -470,10 +485,20 @@ def main() -> None:
         )
         best_state["celebdf_test_metrics"] = target_metrics
         save_checkpoint(best_path, best_state)
-        final_record = {"event": "final_target_evaluation", "celebdf_test": target_metrics}
-        print(json.dumps(final_record, indent=2))
-        with history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(final_record) + "\n")
+        append_history(
+            history_path,
+            {"event": "final_target_evaluation", "celebdf_test": target_metrics},
+        )
+
+    # The per-epoch stream never says which epoch ``best.pt`` actually holds,
+    # so a finished run cannot be read back from history alone. Written last so
+    # the target metrics of the selected model are part of the same record.
+    #
+    # A resumed run that never improves leaves this ``None``: its selected epoch
+    # was already recorded by the run that produced it.
+    if best_record is not None:
+        best_record["celebdf_test"] = target_metrics
+        append_history(history_path, best_record)
 
 
 if __name__ == "__main__":

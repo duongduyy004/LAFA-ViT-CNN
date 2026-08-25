@@ -291,6 +291,35 @@ Sau khi vòng lặp train/early-stopping kết thúc, nếu
 `history.jsonl`. Đây là test post-selection thuần túy, không ảnh hưởng lựa
 chọn checkpoint. `data.ffpp_test_frames` không được `train.py` dùng ở bước này.
 
+### Nội dung `history.jsonl`
+
+Mỗi dòng là một JSON object. Ba loại record:
+
+| record | khi nào | nội dung |
+| --- | --- | --- |
+| epoch | mỗi epoch | `epoch`, `learning_rates`, `loss_weights`, `train`, và metrics của manifest chọn (`validation` hoặc `celebdf_test`) |
+| `event: final_target_evaluation` | cuối run, chỉ khi có target riêng | `celebdf_test` metrics của `best.pt` |
+| `event: best_model` | cuối mọi run có checkpoint mới | epoch được chọn và metrics của nó |
+
+Record `best_model` là dòng cuối cùng và là chỗ duy nhất trong history nói
+`best.pt` thuộc epoch nào:
+
+```json
+{
+  "event": "best_model",
+  "epoch": 7,
+  "selection_name": "validation",
+  "selection_metrics": { "level": "video", "auc": 0.9412, "...": "..." },
+  "best_selection_auc": 0.9412,
+  "checkpoint": "best.pt",
+  "celebdf_test": { "level": "video", "auc": 0.8137, "...": "..." }
+}
+```
+
+`celebdf_test` là `null` khi run không có target dataset riêng. Một run resume
+mà không cải thiện AUC sẽ không ghi record này — epoch được chọn đã nằm trong
+history của run sinh ra nó.
+
 ## Cài đặt và train
 
 ```powershell
