@@ -23,7 +23,11 @@ class TinyProjectedForensicEncoder(nn.Module):
 
 
 def _tiny_model(
-    monkeypatch, *, enable_srm=False, enable_fft=False, forgery_methods=("DF", "F2F")
+    monkeypatch,
+    *,
+    enable_srm=False,
+    enable_fft=False,
+    forgery_methods=("DF", "F2F"),
 ):
     monkeypatch.setattr(
         model_module, "ProjectedForensicEncoder", TinyProjectedForensicEncoder
@@ -78,20 +82,6 @@ def test_forward_group_supports_all_fixed_slot_ablations(
         assert model.fft_encoder.project.weight.grad is not None
     else:
         assert model.fft_encoder is None
-
-
-def test_rgb_only_uses_zero_for_disabled_fixed_slots(monkeypatch):
-    model = _tiny_model(monkeypatch)
-    captured = []
-    hook = model.late_fusion.register_forward_pre_hook(
-        lambda _, inputs: captured.append(inputs[0].detach())
-    )
-    try:
-        model({"rgb": torch.randn(1, 3, 224, 224)})
-    finally:
-        hook.remove()
-    assert captured[0].shape == (1, model.embed_dim * 3)
-    assert torch.count_nonzero(captured[0][:, model.embed_dim:]) == 0
 
 
 def test_forward_mapping_returns_logits_and_features_without_teachers(monkeypatch):
@@ -245,3 +235,96 @@ def test_favit_adapters_still_start_as_noops_and_backbone_is_frozen(monkeypatch)
     assert torch.count_nonzero(model.injectors[0].scale) == 0
     assert not model.backbone.patch_embed.proj.weight.requires_grad
     assert model.student_adapter.scale.requires_grad
+
+
+def test_rgb_cnn_branch_matches_favit_cnn_reference_layer_stack():
+    """Pins the ported FA-ViT-CNN CNN_feature_extractor_branch layer-for-layer.
+
+    The conv stack is the contribution being adopted from the reference
+    implementation; a silent substitution (different widths, strides, or a
+    dropped MaxPool) would change what the branch can represent while every
+    shape assertion still passed.
+    """
+    branch = model_module.CNNFeatureBranch(3, 768)
+    observed = [
+        (type(layer).__name__, getattr(layer, "out_channels", None))
+        for layer in branch.features
+    ]
+    assert observed == [
+        ("Conv2d", 32), ("BatchNorm2d", None), ("GELU", None), ("MaxPool2d", None),
+        ("Conv2d", 64), ("BatchNorm2d", None), ("GELU", None), ("MaxPool2d", None),
+        ("Conv2d", 128), ("BatchNorm2d", None), ("GELU", None), ("MaxPool2d", None),
+        ("Conv2d", 128), ("BatchNorm2d", None), ("GELU", None),
+        ("AdaptiveAvgPool2d", None), ("Flatten", None),
+    ]
+    assert [type(layer).__name__ for layer in branch.project] == [
+        "Linear", "LayerNorm"
+    ]
+    assert branch.project[0].in_features == 128
+
+
+def test_rgb_cnn_branch_pools_any_spatial_size_to_embed_dim():
+    branch = model_module.CNNFeatureBranch(3, 64)
+    assert branch(torch.randn(2, 3, 224, 224)).shape == (2, 64)
+
+
+def test_rgb_cnn_branch_occupies_second_fixed_slot(monkeypatch):
+    """Pins slot order [vit, rgb_cnn, srm, fft] against a silent reordering."""
+    model = _tiny_model(monkeypatch, enable_fft=True).eval()
+    rgb = torch.randn(1, 3, 224, 224)
+    captured = []
+    hook = model.late_fusion.register_forward_pre_hook(
+        lambda _, values: captured.append(values[0].detach())
+    )
+    try:
+        with torch.no_grad():
+            model({"rgb": rgb, "fft": torch.randn(1, 3, 224, 224)})
+            expected = model.rgb_cnn_encoder(rgb)
+    finally:
+        hook.remove()
+    width = model.embed_dim
+    assert captured[0].shape == (1, width * 4)
+    assert torch.allclose(captured[0][:, width : width * 2], expected, atol=1e-6)
+    assert torch.count_nonzero(captured[0][:, width * 2 : width * 3]) == 0
+
+
+def test_rgb_only_still_populates_the_rgb_cnn_slot(monkeypatch):
+    """The RGB CNN branch is mandatory; only SRM/FFT slots may be zero."""
+    model = _tiny_model(monkeypatch)
+    captured = []
+    hook = model.late_fusion.register_forward_pre_hook(
+        lambda _, values: captured.append(values[0].detach())
+    )
+    try:
+        model({"rgb": torch.randn(1, 3, 224, 224)})
+    finally:
+        hook.remove()
+    width = model.embed_dim
+    assert captured[0].shape == (1, width * 4)
+    assert torch.count_nonzero(captured[0][:, width : width * 2]) > 0
+    assert torch.count_nonzero(captured[0][:, width * 2 :]) == 0
+
+
+def test_rgb_cnn_branch_cannot_be_disabled(monkeypatch):
+    """Catches the branch regressing to an optional slot."""
+    import inspect
+
+    model = _tiny_model(monkeypatch)
+    assert model.rgb_cnn_encoder is not None
+    signature = inspect.signature(create_favit_lsda)
+    assert "enable_rgb_cnn_branch" not in signature.parameters
+
+
+def test_rgb_cnn_branch_reuses_rgb_input_without_new_branch_key(monkeypatch):
+    """The branch is fed inputs['rgb']; it must not demand its own mapping key."""
+    model = _tiny_model(monkeypatch)
+    assert model.enabled_branches == ("rgb",)
+    model.forward_group({"rgb": torch.randn(1, 3, 3, 224, 224)})
+
+
+def test_rgb_cnn_branch_receives_gradient_in_group_training(monkeypatch):
+    model = _tiny_model(monkeypatch)
+    output = model.forward_group({"rgb": torch.randn(1, 3, 3, 224, 224)})
+    output["logits"].square().mean().backward()
+    assert model.rgb_cnn_encoder.features[0].weight.grad is not None
+    assert model.rgb_cnn_encoder.project[0].weight.grad is not None

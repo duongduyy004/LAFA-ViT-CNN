@@ -74,14 +74,16 @@ def restore_random_state(state: dict | None) -> None:
 def load_favit_initialization(model: torch.nn.Module, checkpoint_path: Path) -> int:
     """Load only matching name-and-shape FA-ViT tensors from a source checkpoint.
 
-    Detector-specific heads, forensic encoders, and late fusion are excluded
-    because they have no counterpart worth transplanting from a FA-ViT source.
+    Detector-specific heads, the parallel RGB CNN branch, forensic encoders,
+    and late fusion are excluded because they have no counterpart worth
+    transplanting from a FA-ViT source.
     """
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     source = checkpoint.get("model", checkpoint)
     target = model.state_dict()
     excluded_prefixes = (
         "head.",
+        "rgb_cnn_encoder.",
         "srm_encoder.",
         "fft_encoder.",
         "late_fusion.",

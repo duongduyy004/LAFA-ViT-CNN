@@ -46,7 +46,9 @@ def test_branch_config_rejects_non_boolean_toggles(field, value):
         resolve_branch_config({field: value})
 
 
-@pytest.mark.parametrize("key", ["artifact_mode", "cnn_in_channels"])
+@pytest.mark.parametrize(
+    "key", ["artifact_mode", "cnn_in_channels", "enable_rgb_cnn_branch"]
+)
 def test_legacy_artifact_fields_are_rejected(key):
     with pytest.raises(ValueError, match=rf"obsolete.*{key}"):
         validate_model_config({key: "legacy"})
@@ -98,3 +100,21 @@ def test_primary_config_is_explicitly_rgb_only():
     assert config["model"]["srm_backbone"] == "xception"
     assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
     assert config["model"]["forensic_pretrained"] is True
+
+
+def test_build_model_from_config_always_constructs_the_rgb_cnn_branch():
+    """The branch is part of the architecture, not an opt-in slot."""
+    from favit_lsda.config import build_model_from_config
+
+    model = build_model_from_config(
+        {"backbone": "vit_tiny_patch16_224", "forgery_methods": ["DF", "F2F"]},
+        pretrained=False,
+    )
+    assert model.rgb_cnn_encoder is not None
+
+
+def test_ffpp_test_runner_covers_every_ablation_config():
+    """Catches a new ablation config silently missing from the batch runner."""
+    import run_ffpp_tests
+
+    assert set(run_ffpp_tests.CASES) == APPROVED_ABLATION_CONFIGS

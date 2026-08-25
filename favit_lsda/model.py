@@ -141,6 +141,51 @@ class SpatialCNN(nn.Module):
         return x, self.project(x).flatten(2).transpose(1, 2)
 
 
+class CNNFeatureBranch(nn.Module):
+    """Parallel CNN branch adopted from FA-ViT-CNN's ``CNN_feature_extractor_branch``.
+
+    Unlike ``spatial_stem``/``SpatialCNN``, whose features exist to be injected
+    into the ViT through LAM, this branch never touches the transformer: it
+    pools to a single vector that enters late fusion beside the FA-ViT feature.
+    It is mandatory: RGB always reaches late fusion through both the FA-ViT
+    path and this one, so the slot is never zero-filled.
+
+    The convolutional stack is kept layer-for-layer identical to the reference
+    implementation. Only the projection width differs, and only because the
+    reference exposes it as a configurable ``freq_dim``; ``embed_dim`` keeps
+    every fusion slot the same width.
+    """
+
+    def __init__(self, in_channels: int, embed_dim: int) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        self.project = nn.Sequential(
+            nn.Linear(128, embed_dim),
+            nn.LayerNorm(embed_dim),
+        )
+
+    def forward(self, images: Tensor) -> Tensor:
+        return self.project(self.features(images))
+
+
 class LocalAdaptiveAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__()
@@ -314,6 +359,7 @@ class ForgeryAwareLSDAViT(nn.Module):
             nn.GELU(),
             nn.Dropout(feature_dropout),
         )
+        self.rgb_cnn_encoder = CNNFeatureBranch(3, self.embed_dim)
         self.srm_encoder = (
             ProjectedForensicEncoder(
                 srm_backbone, self.embed_dim, forensic_pretrained, feature_dropout
@@ -329,7 +375,7 @@ class ForgeryAwareLSDAViT(nn.Module):
             else None
         )
         self.late_fusion = nn.Sequential(
-            nn.Linear(self.embed_dim * 3, self.embed_dim),
+            nn.Linear(self.embed_dim * 4, self.embed_dim),
             nn.LayerNorm(self.embed_dim),
             nn.GELU(),
             nn.Dropout(feature_dropout),
@@ -381,6 +427,7 @@ class ForgeryAwareLSDAViT(nn.Module):
             self.fake_teachers,
             self.latent_augmenter,
             self.vit_feature_fusion,
+            self.rgb_cnn_encoder,
             *(module for module in (self.srm_encoder, self.fft_encoder) if module is not None),
             self.late_fusion,
             self.head,
@@ -496,11 +543,14 @@ class ForgeryAwareLSDAViT(nn.Module):
     ) -> tuple[Tensor, Tensor, Tensor]:
         vit_features, student_maps = self._student_features(cls_features, patch_maps)
         zero = torch.zeros_like(vit_features)
+        rgb_cnn_features = self.rgb_cnn_encoder(flat_inputs["rgb"])
         srm_features = self.srm_encoder(flat_inputs["srm"]) if self.srm_encoder else zero
         fft_features = self.fft_encoder(flat_inputs["fft"]) if self.fft_encoder else zero
         return (
             self.late_fusion(
-                torch.cat((vit_features, srm_features, fft_features), dim=1)
+                torch.cat(
+                    (vit_features, rgb_cnn_features, srm_features, fft_features), dim=1
+                )
             ),
             vit_features,
             student_maps,

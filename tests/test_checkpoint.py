@@ -54,12 +54,14 @@ def test_favit_initialization_excludes_head_even_when_shape_matches(tmp_path):
             super().__init__()
             self.body = torch.nn.Linear(3, 2)
             self.head = torch.nn.Linear(2, 2, bias=False)
+            self.rgb_cnn_encoder = torch.nn.Linear(3, 2, bias=False)
             self.srm_encoder = torch.nn.Linear(3, 2, bias=False)
             self.fft_encoder = torch.nn.Linear(3, 2, bias=False)
             self.late_fusion = torch.nn.Linear(4, 2, bias=False)
 
     model = Detector()
     original_head_weight = model.head.weight.detach().clone()
+    original_rgb_cnn_weight = model.rgb_cnn_encoder.weight.detach().clone()
     original_srm_weight = model.srm_encoder.weight.detach().clone()
     original_fft_weight = model.fft_encoder.weight.detach().clone()
     original_fusion_weight = model.late_fusion.weight.detach().clone()
@@ -67,6 +69,7 @@ def test_favit_initialization_excludes_head_even_when_shape_matches(tmp_path):
         "model": {
             "body.weight": torch.full_like(model.body.weight, 7.0),
             "head.weight": torch.full_like(model.head.weight, 3.0),
+            "rgb_cnn_encoder.weight": torch.full_like(model.rgb_cnn_encoder.weight, 4.0),
             "srm_encoder.weight": torch.full_like(model.srm_encoder.weight, 5.0),
             "fft_encoder.weight": torch.full_like(model.fft_encoder.weight, 6.0),
             "late_fusion.weight": torch.full_like(model.late_fusion.weight, 8.0),
@@ -78,6 +81,7 @@ def test_favit_initialization_excludes_head_even_when_shape_matches(tmp_path):
     assert loaded == 1
     assert torch.equal(model.body.weight, torch.full_like(model.body.weight, 7.0))
     assert torch.equal(model.head.weight, original_head_weight)
+    assert torch.equal(model.rgb_cnn_encoder.weight, original_rgb_cnn_weight)
     assert torch.equal(model.srm_encoder.weight, original_srm_weight)
     assert torch.equal(model.fft_encoder.weight, original_fft_weight)
     assert torch.equal(model.late_fusion.weight, original_fusion_weight)
@@ -106,7 +110,7 @@ def test_checkpoint_rejects_legacy_architecture(tmp_path):
         )
 
 
-@pytest.mark.parametrize("version", [5, 2, None, "4"])
+@pytest.mark.parametrize("version", [6, 2, None, "5"])
 def test_checkpoint_rejects_unsupported_format_version(tmp_path, version):
     """Catches a future on-disk format bump loading silently against old code."""
     from favit_lsda.checkpoints import validate_checkpoint_branches
@@ -161,7 +165,7 @@ def test_checkpoint_rejects_malformed_top_level_branch_metadata(tmp_path):
 def _tiny_checkpoint(model_config: dict, state: dict | None = None) -> dict:
     branches = resolve_branch_config(model_config)
     return {
-        "format_version": 4,
+        "format_version": 5,
         "architecture": "favit_lsda_multibranch",
         "enabled_branches": list(branches.enabled_branches),
         "srm_backbone": branches.srm_backbone if branches.enable_srm else None,
@@ -493,10 +497,55 @@ def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata
     assert len(captured) == 1
     model, _ = captured[0]
     best = torch.load(output_dir / "best.pt", weights_only=False)
-    assert best["format_version"] == 4
+    assert best["format_version"] == 5
     assert best["architecture"] == "favit_lsda_multibranch"
     assert best["enabled_branches"] == list(model.enabled_branches)
     assert best["srm_backbone"] == model.srm_backbone_name
     assert best["fft_backbone"] == model.fft_backbone_name
     assert best["fusion"] == model.fusion_name
     assert best["celebdf_test_metrics"]["level"] == "video"
+
+
+def test_checkpoint_metadata_is_version_five(tmp_path):
+    """The mandatory RGB CNN slot widened late_fusion, so v4 state cannot load."""
+    from favit_lsda.checkpoints import model_branch_metadata
+
+    model = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
+    metadata = model_branch_metadata(model)
+    assert metadata["format_version"] == 5
+    # The branch reads inputs['rgb'], so it must not widen the input contract.
+    assert metadata["enabled_branches"] == ["rgb"]
+
+
+def test_checkpoint_rejects_legacy_v4_with_migration_message(tmp_path):
+    """A v4 checkpoint predates the RGB CNN slot; its late_fusion is narrower."""
+    from favit_lsda.checkpoints import validate_checkpoint_branches
+
+    checkpoint = {
+        "format_version": 4,
+        "architecture": "favit_lsda_multibranch",
+    }
+    with pytest.raises(ValueError, match=r"legacy.*format_version 4.*--init-favit"):
+        validate_checkpoint_branches(checkpoint, {}, tmp_path / "old.pt")
+
+
+def test_train_round_trip_carries_the_rgb_cnn_branch(tmp_path, monkeypatch):
+    """Trains, saves and reloads a run whose fourth fusion slot is populated.
+
+    Exercises the branch through forward_group, frame-level evaluation and the
+    checkpoint contract in one pass, which unit coverage of the module alone
+    cannot do.
+    """
+    config_path, config = _write_train_fixture(tmp_path, epochs=1)
+    captured = _record_train_models(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["train.py", "--config", config_path])
+    train.main()
+
+    model, _ = captured[0]
+    assert model.rgb_cnn_encoder is not None
+    best = torch.load(Path(config["output_dir"]) / "best.pt", weights_only=False)
+    assert any(key.startswith("rgb_cnn_encoder.") for key in best["model"])
+
+    reloaded = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
+    reloaded.load_state_dict(best["model"])
+    assert reloaded.late_fusion[0].in_features == reloaded.embed_dim * 4

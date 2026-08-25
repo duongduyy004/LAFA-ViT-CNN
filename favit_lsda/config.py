@@ -35,10 +35,14 @@ def _boolean_toggle(model_config: dict[str, Any], field: str, default: bool) -> 
 
 
 def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
-    legacy = sorted({"artifact_mode", "cnn_in_channels"} & model_config.keys())
+    legacy = sorted(
+        {"artifact_mode", "cnn_in_channels", "enable_rgb_cnn_branch"}
+        & model_config.keys()
+    )
     if legacy:
         raise ValueError(
-            f"obsolete model field(s) {legacy}; use enable_srm_branch and "
+            f"obsolete model field(s) {legacy}; the RGB CNN branch is always "
+            "enabled, and forensic paths use enable_srm_branch and "
             "enable_fft_branch"
         )
     value = BranchConfig(

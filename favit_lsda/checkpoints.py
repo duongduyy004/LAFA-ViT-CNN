@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED_ARCHITECTURE = "favit_lsda_multibranch"
-SUPPORTED_FORMAT_VERSION = 4
+SUPPORTED_FORMAT_VERSION = 5
+#: On-disk formats this build can name but not read. Each predates a fixed-slot
+#: fusion width change, so their ``late_fusion`` tensors cannot be transplanted.
+LEGACY_FORMAT_VERSIONS = (3, 4)
 
 
 def model_branch_metadata(model) -> dict[str, Any]:
-    """Return the authoritative v4 branch metadata for a constructed model."""
+    """Return the authoritative v5 branch metadata for a constructed model."""
     return {
         "format_version": SUPPORTED_FORMAT_VERSION,
         "architecture": EXPECTED_ARCHITECTURE,
@@ -30,7 +33,7 @@ def validate_checkpoint_branches(
     architecture = checkpoint.get("architecture")
     format_version = checkpoint.get("format_version")
     if architecture != EXPECTED_ARCHITECTURE:
-        if format_version == 3 or architecture == "favit_lsda_cnn":
+        if format_version in LEGACY_FORMAT_VERSIONS or architecture == "favit_lsda_cnn":
             raise ValueError(
                 f"checkpoint at {checkpoint_path} has legacy architecture "
                 f"{architecture!r} (legacy format_version {format_version!r}); "
@@ -41,11 +44,12 @@ def validate_checkpoint_branches(
             f"checkpoint at {checkpoint_path} has unsupported architecture "
             f"{architecture!r}; expected {EXPECTED_ARCHITECTURE!r}"
         )
-    if format_version == 3:
+    if format_version in LEGACY_FORMAT_VERSIONS:
         raise ValueError(
-            f"checkpoint at {checkpoint_path} is a legacy format_version 3 "
-            "checkpoint; migrate it by starting a new run and loading it "
-            "with --init-favit instead of --resume or evaluation."
+            f"checkpoint at {checkpoint_path} is a legacy format_version "
+            f"{format_version} checkpoint; migrate it by starting a new run "
+            "and loading it with --init-favit instead of --resume or "
+            "evaluation."
         )
     if format_version != SUPPORTED_FORMAT_VERSION:
         raise ValueError(

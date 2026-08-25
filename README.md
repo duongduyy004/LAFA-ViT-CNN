@@ -118,10 +118,12 @@ hữu hạn `[3, image_size, image_size]`, và mọi branch có cùng hình họ
 group [real + 4 fake domains]
               │
               ├─ rgb ──► shared FA-ViT encoder ──► RGB feature ───────────┐
-              │                    │                                      │
-              │                    ├─ student/teacher maps ──► LSDA       │
-              │                    ├─ distillation                        │
-              │                    └─ domain + invariance objectives       │
+              │     │              │                                      │
+              │     │              ├─ student/teacher maps ──► LSDA       │
+              │     │              ├─ distillation                        │
+              │     │              └─ domain + invariance objectives       │
+              │     │                                                     │
+              │     └─► CNNFeatureBranch ──► RGB-CNN slot ───────────────┤
               │                                                           │
               ├─ srm ──► Xception ──► projection ──► SRM slot / zero ─────┤
               │                                                           │
@@ -156,15 +158,25 @@ group [real + 4 fake domains]
    method từ teacher maps. Một classifier khác nhận student RGB features qua
    Gradient Reversal Layer (GRL); gradient đảo chiều buộc student giảm thông tin
    đặc thù của từng phương pháp giả mạo.
-6. **SRM/Xception:** khi bật, Xception nhận duy nhất tensor SRM ba kênh, global
+6. **RGB CNN branch (`CNNFeatureBranch`):** **luôn bật**, không có toggle. Một
+   CNN nhẹ chạy **song song** FA-ViT trên cùng tensor RGB — không đi qua ViT, không bơm vào block
+   nào — rồi global-pool và projection `Linear -> LayerNorm` về `embed_dim`.
+   Stack conv được port nguyên vẹn từ `CNN_feature_extractor_branch` của
+   [Dual_Branch_FA_ViT_and_CNN](https://github.com/manhchienkmagpt/Dual_Branch_FA_ViT_and_CNN)
+   (`training_model/models/favit_cnn.py`); chỉ độ rộng projection đổi từ
+   `freq_dim` sang `embed_dim` để mọi fusion slot cùng width. Nhánh này khác
+   hẳn `spatial_stem`/`SpatialCNN`: hai module đó tồn tại để bơm đặc trưng cục
+   bộ **vào** ViT qua LAM và feature map cuối của chúng bị loại bỏ.
+7. **SRM/Xception:** khi bật, Xception nhận duy nhất tensor SRM ba kênh, global
    pool rồi projection `Linear -> LayerNorm -> GELU -> Dropout` về
    `embed_dim`. Toàn bộ backbone và projection được fine-tune.
-7. **FFT/MobileNetV3-Small:** khi bật, MobileNetV3-Small nhận duy nhất FFT
+8. **FFT/MobileNetV3-Small:** khi bật, MobileNetV3-Small nhận duy nhất FFT
    log-magnitude ba kênh và dùng cùng projection contract. Toàn bộ branch được
    fine-tune.
-8. **Fixed-slot late fusion:** luôn concat theo thứ tự `[RGB, SRM, FFT]`; branch
-   tắt không được construct hoặc execute và đóng góp `zeros_like(rgb_feature)`.
-   Vector `3 * embed_dim` đi qua fusion MLP trước binary head và FAL.
+9. **Fixed-slot late fusion:** luôn concat theo thứ tự
+   `[RGB, RGB-CNN, SRM, FFT]`. Hai slot đầu luôn được điền; SRM/FFT khi tắt
+   không được construct hoặc execute và đóng góp `zeros_like(rgb_feature)`.
+   Vector `4 * embed_dim` đi qua fusion MLP trước binary head và FAL.
 
 LSDA teachers, latent augmentation, MSE distillation, teacher domain
 classification và student domain invariance chỉ đọc biểu diễn RGB/FA-ViT.
@@ -186,15 +198,19 @@ fft_backbone: mobilenetv3_small_100
 forensic_pretrained: true
 ```
 
-RGB luôn bật. Hai toggle phải là YAML boolean thực (`true`/`false`), không
-phải chuỗi. Backbone names được kiểm tra đúng hai giá trị hỗ trợ.
+RGB/FA-ViT và RGB CNN branch luôn bật, không cấu hình được. Hai toggle SRM/FFT
+phải là YAML boolean thực (`true`/`false`), không phải chuỗi. RGB CNN branch
+đọc lại `inputs["rgb"]` nên không thêm key vào input mapping và
+`enabled_branches` không đổi. Field `enable_rgb_cnn_branch` bị từ chối như một
+obsolete field, cùng nhóm với `artifact_mode` và `cnn_in_channels`. Backbone names được kiểm tra đúng hai giá trị hỗ trợ.
 `forensic_pretrained: true` dùng ImageNet initialization; encoder forensic và
 projection được full-finetune. `model.pretrained: false` chỉ tắt pretrained
 FA-ViT; để chạy hoàn toàn offline, đặt thêm `forensic_pretrained: false`.
 
 Optimizer dùng `backbone_lr_multiplier` cho `backbone.*`,
-`srm_encoder.backbone.*` và `fft_encoder.backbone.*`; projection, fusion,
-adapter và head dùng base learning rate.
+`srm_encoder.backbone.*` và `fft_encoder.backbone.*`; `rgb_cnn_encoder.*`
+(train from scratch), projection, fusion, adapter và head dùng base learning
+rate.
 
 ### Sơ đồ khi inference
 
@@ -202,6 +218,7 @@ adapter và head dùng base learning rate.
 frame RGB đã augment/normalize
         │
         ├─ rgb ─► shared FA-ViT ───────► RGB slot ───────────────┐
+        ├─ rgb ─► CNNFeatureBranch ────► RGB-CNN slot ───────────┤
         ├─ srm ─► Xception ────────────► SRM slot (nếu bật) ─────┤
         └─ fft ─► MobileNetV3-Small ───► FFT slot (nếu bật) ─────┤
                                                                 ▼
@@ -281,7 +298,7 @@ pip install -e ".[test]"
 python train.py --config configs/favit_lsda_rgb.yaml --device cuda:0
 ```
 
-Resume checkpoint v4:
+Resume checkpoint v5:
 
 ```powershell
 python train.py `
@@ -293,7 +310,8 @@ python train.py `
 ### Bốn thí nghiệm branch có kiểm soát
 
 Bốn config dùng chung seed, optimizer, schedule, augmentation, `image_size` và
-manifest; chỉ branch toggles và `output_dir` thay đổi:
+manifest; chỉ branch toggles và `output_dir` thay đổi. Mọi config đều có
+FA-ViT và RGB CNN branch — chỉ SRM/FFT là biến thí nghiệm:
 
 | Config | SRM | FFT | `output_dir` |
 | --- | ---: | ---: | --- |
@@ -310,14 +328,13 @@ python train.py --config configs/favit_lsda_rgb_srm_fft.yaml
 ```
 
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
-`run_ffpp_tests.py` chỉ chạy bốn file trên.
 
 ## Checkpoint và migration
 
 Checkpoint multibranch lưu:
 
 ```text
-format_version: 4
+format_version: 5
 architecture: favit_lsda_multibranch
 enabled_branches: [rgb, srm?, fft?]
 srm_backbone / fft_backbone: tên backbone hoặc null
@@ -330,11 +347,13 @@ evaluation load weights khi model còn ở CPU rồi mới chuyển model sang d
 Resume vẫn phục hồi optimizer, scheduler, scaler và random state sau khi các
 object tương ứng được xây.
 
-Checkpoint format v3/`favit_lsda_cnn` bị từ chối vì state/shape contract không
-tương thích. Các từ legacy `artifact_mode`, `cnn_in_channels`,
+Checkpoint format v3/`favit_lsda_cnn` và v4 đều bị từ chối vì state/shape
+contract không tương thích — v4 có `late_fusion` rộng `3 * embed_dim`, trước
+khi RGB-CNN slot bắt buộc được thêm. Các từ legacy `artifact_mode`, `cnn_in_channels`,
 `rgb_wavelet`, `srm_wavelet` và `FreqNet` chỉ còn được nhắc ở migration.
 Dùng `--init-favit` để nạp các FA-ViT tensor tương thích vào một run mới;
-detector head, SRM/FFT encoders, projections và late fusion được khởi tạo mới.
+detector head, RGB CNN branch, SRM/FFT encoders, projections và late fusion
+được khởi tạo mới.
 
 ## Evaluate
 
