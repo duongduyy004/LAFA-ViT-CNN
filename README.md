@@ -415,6 +415,31 @@ trả về JSON gồm `accuracy`, `f1_score`, `precision`, `recall` và `auc`.
 AUC dùng xác suất liên tục; bốn metric còn lại dùng `--threshold 0.5` (có thể
 thay đổi), với fake (`label=1`) là positive class.
 
+### Chạy batch cả bốn case ablation
+
+`run_ffpp_tests.py` gọi `evaluate_ffpp.py` lần lượt cho bốn config branch
+(`favit_lsda_rgb`, `..._rgb_srm`, `..._rgb_fft`, `..._rgb_srm_fft`) trên cùng
+một manifest FF++:
+
+```powershell
+python run_ffpp_tests.py `
+  --manifest E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed\manifests\ffpp_c23_test_frames.csv `
+  --level video
+```
+
+Manifest mặc định đã là `ffpp_c23_test_frames.csv` nên có thể chạy gọn:
+
+```powershell
+python run_ffpp_tests.py
+```
+
+Với mỗi case, script đọc `output_dir` từ config, dùng checkpoint
+`<output_dir>\best.pt` (đổi bằng `--checkpoint-name`) và ghi kết quả vào
+`<output_dir>\ffpp_test_result_<level>.json`. Case thiếu checkpoint bị bỏ qua,
+case chạy lỗi được ghi JSON có khoá `error`; các case còn lại vẫn chạy tiếp và
+script thoát với exit code 1 nếu có case hỏng. Phải chạy từ thư mục gốc repo vì
+đường dẫn `configs/` và `evaluate_ffpp.py` là tương đối.
+
 ## Test và ablation
 
 ```powershell
