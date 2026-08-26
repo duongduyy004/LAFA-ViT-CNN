@@ -18,6 +18,7 @@ CASES = [
     "favit_lsda_rgb_srm.yaml",
     "favit_lsda_rgb_fft.yaml",
     "favit_lsda_rgb_srm_fft.yaml",
+    "favit_lsda_rgb_srm_effb4.yaml",
 ]
 
 
@@ -28,16 +29,34 @@ def output_dir_of(config_path: Path) -> Path:
     return Path(str(output_dir))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run evaluate_ffpp.py for every case config")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run evaluate_ffpp.py for one or every case config"
+    )
     parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
     parser.add_argument("--level", default="video", choices=("frame", "video"))
     parser.add_argument("--checkpoint-name", default="best.pt")
     parser.add_argument("--python", default=sys.executable)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--case",
+        action="append",
+        choices=CASES,
+        dest="cases",
+        metavar="CONFIG.yaml",
+        help=(
+            "Restrict the run to one case config filename (repeatable). "
+            "Default: run every case in CASES."
+        ),
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    cases = args.cases if args.cases else CASES
 
     failures = []
-    for name in CASES:
+    for name in cases:
         config_path = CONFIGS_DIR / name
         if not config_path.is_file():
             print(f"[skip] config not found: {config_path}")

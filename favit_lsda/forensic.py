@@ -5,6 +5,13 @@ import torch
 from torch import Tensor, nn
 
 
+#: Mean/std the data pipeline already normalizes every branch input to
+#: (RGB via ``TF.normalize``, SRM/FFT via ``_normalize_artifact``), i.e. the
+#: input arrives in [-1, 1] under a 0.5/0.5 assumption.
+_PIPELINE_MEAN = (0.5, 0.5, 0.5)
+_PIPELINE_STD = (0.5, 0.5, 0.5)
+
+
 def _backbone_output_width(backbone: nn.Module, model_name: str) -> int:
     """Resolve the width returned by a pooled timm backbone without a probe."""
     for attribute in ("head_hidden_size", "num_features"):
@@ -20,6 +27,18 @@ def _backbone_output_width(backbone: nn.Module, model_name: str) -> int:
     raise ValueError(
         f"{model_name} backbone must expose a positive head_hidden_size or num_features"
     )
+
+
+def _backbone_normalization(backbone: nn.Module) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Resolve a timm backbone's expected mean/std, defaulting to the pipeline's."""
+    cfg = getattr(backbone, "pretrained_cfg", None) or getattr(backbone, "default_cfg", None)
+    if not cfg:
+        return _PIPELINE_MEAN, _PIPELINE_STD
+    mean = cfg.get("mean") if hasattr(cfg, "get") else getattr(cfg, "mean", None)
+    std = cfg.get("std") if hasattr(cfg, "get") else getattr(cfg, "std", None)
+    if not mean or not std or len(mean) != 3 or len(std) != 3:
+        return _PIPELINE_MEAN, _PIPELINE_STD
+    return tuple(float(value) for value in mean), tuple(float(value) for value in std)
 
 
 class ProjectedForensicEncoder(nn.Module):
@@ -47,6 +66,17 @@ class ProjectedForensicEncoder(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
         )
+        # Re-normalize from the pipeline's [-1, 1] (0.5/0.5) convention to
+        # whatever mean/std this backbone was pretrained on, so a backbone
+        # whose pretrained stats differ (e.g. ImageNet mean/std) isn't fed
+        # mismatched inputs. x_backbone = x_pipeline * scale + shift.
+        mean, std = _backbone_normalization(self.backbone)
+        scale = tuple(_PIPELINE_STD[i] / std[i] for i in range(3))
+        shift = tuple(
+            (_PIPELINE_MEAN[i] - mean[i]) / std[i] for i in range(3)
+        )
+        self.register_buffer("_renorm_scale", torch.tensor(scale).view(1, 3, 1, 1))
+        self.register_buffer("_renorm_shift", torch.tensor(shift).view(1, 3, 1, 1))
 
     def forward(self, images: Tensor) -> Tensor:
         if images.ndim != 4 or images.shape[1] != 3:
@@ -55,6 +85,7 @@ class ProjectedForensicEncoder(nn.Module):
             )
         if not images.is_floating_point() or not torch.isfinite(images).all():
             raise ValueError(f"{self.model_name} input must be finite floating point")
+        images = images * self._renorm_scale + self._renorm_shift
         features = self.backbone(images)
         if features.ndim != 2:
             raise RuntimeError(

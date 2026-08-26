@@ -202,7 +202,16 @@ RGB/FA-ViT và RGB CNN branch luôn bật, không cấu hình được. Hai togg
 phải là YAML boolean thực (`true`/`false`), không phải chuỗi. RGB CNN branch
 đọc lại `inputs["rgb"]` nên không thêm key vào input mapping và
 `enabled_branches` không đổi. Field `enable_rgb_cnn_branch` bị từ chối như một
-obsolete field, cùng nhóm với `artifact_mode` và `cnn_in_channels`. Backbone names được kiểm tra đúng hai giá trị hỗ trợ.
+obsolete field, cùng nhóm với `artifact_mode` và `cnn_in_channels`. Backbone
+names được kiểm tra qua allowlist (`SUPPORTED_SRM_BACKBONES`/
+`SUPPORTED_FFT_BACKBONES` trong `favit_lsda/config.py`): SRM nhận `xception`,
+`tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`; FFT nhận
+`mobilenetv3_small_100`, `tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`.
+`ProjectedForensicEncoder` re-normalize input từ quy ước pipeline ([-1, 1],
+0.5/0.5) sang đúng mean/std pretrained của backbone (đọc từ
+`backbone.pretrained_cfg`/`default_cfg`), nên đổi backbone không kéo theo lệch
+chuẩn hoá. Xem `configs/favit_lsda_rgb_srm_effb4.yaml` cho ablation SRM =
+EfficientNet-B4 Noisy-Student so với baseline xception.
 `forensic_pretrained: true` dùng ImageNet initialization; encoder forensic và
 projection được full-finetune. `model.pretrained: false` chỉ tắt pretrained
 FA-ViT; để chạy hoàn toàn offline, đặt thêm `forensic_pretrained: false`.
@@ -356,6 +365,11 @@ python train.py --config configs/favit_lsda_rgb_fft.yaml
 python train.py --config configs/favit_lsda_rgb_srm_fft.yaml
 ```
 
+Một config thứ năm, `configs/favit_lsda_rgb_srm_effb4.yaml`, giữ nguyên toggle
+của `favit_lsda_rgb_srm.yaml` (SRM on, FFT off) nhưng đổi `srm_backbone` sang
+`tf_efficientnet_b4.ns_jft_in1k` — dùng để so sánh backbone SRM, không phải
+biến thí nghiệm SRM/FFT toggle.
+
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
 
 ## Checkpoint và migration
@@ -415,11 +429,11 @@ trả về JSON gồm `accuracy`, `f1_score`, `precision`, `recall` và `auc`.
 AUC dùng xác suất liên tục; bốn metric còn lại dùng `--threshold 0.5` (có thể
 thay đổi), với fake (`label=1`) là positive class.
 
-### Chạy batch cả bốn case ablation
+### Chạy batch cả năm case ablation
 
-`run_ffpp_tests.py` gọi `evaluate_ffpp.py` lần lượt cho bốn config branch
-(`favit_lsda_rgb`, `..._rgb_srm`, `..._rgb_fft`, `..._rgb_srm_fft`) trên cùng
-một manifest FF++:
+`run_ffpp_tests.py` gọi `evaluate_ffpp.py` lần lượt cho năm config branch
+(`favit_lsda_rgb`, `..._rgb_srm`, `..._rgb_fft`, `..._rgb_srm_fft`,
+`..._rgb_srm_effb4`) trên cùng một manifest FF++:
 
 ```powershell
 python run_ffpp_tests.py `
@@ -431,6 +445,20 @@ Manifest mặc định đã là `ffpp_c23_test_frames.csv` nên có thể chạy
 
 ```powershell
 python run_ffpp_tests.py
+```
+
+Dùng `--case CONFIG.yaml` (lặp lại được) để chỉ chạy một hoặc vài case thay vì
+cả năm — hữu ích khi chỉ một checkpoint sẵn sàng hoặc đang debug một case:
+
+```powershell
+python run_ffpp_tests.py --case favit_lsda_rgb.yaml
+python run_ffpp_tests.py --case favit_lsda_rgb_srm.yaml
+python run_ffpp_tests.py --case favit_lsda_rgb_fft.yaml
+python run_ffpp_tests.py --case favit_lsda_rgb_srm_fft.yaml
+python run_ffpp_tests.py --case favit_lsda_rgb_srm_effb4.yaml
+
+# nhiều case cùng lúc
+python run_ffpp_tests.py --case favit_lsda_rgb_srm.yaml --case favit_lsda_rgb_srm_effb4.yaml
 ```
 
 Với mỗi case, script đọc `output_dir` từ config, dùng checkpoint

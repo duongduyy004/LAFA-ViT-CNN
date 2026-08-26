@@ -1,0 +1,85 @@
+seed: 42
+device: cuda
+output_dir: outputs/favit_lsda_rgb_srm_effb4
+
+data:
+  root: "E:\\Deepfake_Data_Chien\\ffpp_celebdf_data\\processed"
+  train_pairs: "E:\\Deepfake_Data_Chien\\ffpp_celebdf_data\\processed\\manifests\\ffpp_c23_train_pairs.csv"
+  celebdf_test_frames: "E:\\Deepfake_Data_Chien\\ffpp_celebdf_data\\processed\\manifests\\celebdf_test_frames.csv"
+  image_size: 224
+  num_workers: 4
+  # Train-only perturbations target the largest FF++ -> Celeb-DF shifts:
+  # crop/alignment, color, blur, resolution and video codec.
+  train_augmentation:
+    horizontal_flip: 0.5
+    crop_scale_min: 0.9
+    color_jitter: 0.15
+    grayscale_probability: 0.1
+    blur_probability: 0.2
+    degradation_probability: 0.25
+    jpeg_probability: 0.3
+    jpeg_quality_min: 35
+
+model:
+  backbone: vit_base_patch16_224.augreg_in21k
+  pretrained: true
+  num_classes: 2
+  forgery_methods: [Deepfakes, Face2Face, FaceSwap, NeuralTextures]
+  gam_reduction: 2
+  inject_layers: [0, 3, 6]
+  train_backbone_norms: true
+  train_cls_token: true
+  # First four follow the paper; difference is retained from the supplied code.
+  latent_transforms: [hard_interpolation, centrifugal, gaussian, rotation, difference]
+  max_rotation_degrees: 12.0
+  latent_noise_std: 0.1
+  mixup_concentration_min: 0.5
+  mixup_concentration_max: 2.0
+  feature_dropout: 0.2
+  # Adapt only the final semantic layers, at the smaller LR configured below.
+  unfreeze_last_blocks: 2
+  domain_adversarial_strength: 1.0
+  enable_srm_branch: true
+  enable_fft_branch: false
+  # Ablation of favit_lsda_rgb_srm.yaml: swaps the SRM branch backbone from
+  # xception to EfficientNet-B4 (Noisy-Student weights) to compare against
+  # the xception baseline under identical everything else.
+  srm_backbone: tf_efficientnet_b4.ns_jft_in1k
+  fft_backbone: mobilenetv3_small_100
+  forensic_pretrained: true
+
+loss:
+  # The binary loss is class-balanced: one real and four fakes no longer imply 1:4.
+  binary_weight: 1.0
+  label_smoothing: 0.05
+  domain_weight: 0.25
+  distill_weight: 0.5
+  invariance_weight: 0.1
+  # Learn the detector first, then introduce LSDA/domain objectives gradually.
+  lsda_warmup_epochs: 2
+  lsda_ramp_epochs: 4
+  invariance_warmup_epochs: 2
+  invariance_ramp_epochs: 4
+  # Retained from FA-ViT.
+  fal_margin: 0.25
+  fal_scale: 24.0
+  fal_weight_after_warmup: 0.25
+  fal_warmup_epochs: 1
+  fal_ramp_epochs: 3
+
+train:
+  epochs: 20
+  # One group contains 1 real + 4 fake images; 4 groups = 20 images/step.
+  group_batch_size: 4
+  eval_image_batch_size: 32
+  learning_rate: 0.00003
+  backbone_lr_multiplier: 0.15
+  weight_decay: 0.05
+  warmup_epochs: 2
+  min_lr_ratio: 0.05
+  max_grad_norm: 1.0
+  early_stopping_patience: 6
+  amp: true
+  resume: null
+  # Optional checkpoint from fa_vit_remake. CLI --init-favit overrides this.
+  init_favit: null

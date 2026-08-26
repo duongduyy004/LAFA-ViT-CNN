@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ APPROVED_ABLATION_CONFIGS = {
     "favit_lsda_rgb_srm.yaml",
     "favit_lsda_rgb_fft.yaml",
     "favit_lsda_rgb_srm_fft.yaml",
+    "favit_lsda_rgb_srm_effb4.yaml",
 }
 PRIMARY_CONFIG = Path("configs/favit_lsda_ffpp_c23_celebdf.yaml")
 
@@ -83,6 +85,17 @@ def test_experiment_config_has_exact_branches(name, srm, fft):
     assert config["output_dir"] == f"outputs/favit_lsda_{name}"
 
 
+def test_srm_effb4_ablation_config_swaps_only_the_srm_backbone():
+    config = load_config(Path("configs") / "favit_lsda_rgb_srm_effb4.yaml")
+    validate_model_config(config["model"])
+    assert config["model"]["enable_srm_branch"] is True
+    assert config["model"]["enable_fft_branch"] is False
+    assert config["model"]["srm_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
+    assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
+    assert config["model"]["forensic_pretrained"] is True
+    assert config["output_dir"] == "outputs/favit_lsda_rgb_srm_effb4"
+
+
 def test_ablation_config_filenames_are_exact():
     observed = {
         path.name
@@ -118,3 +131,30 @@ def test_ffpp_test_runner_covers_every_ablation_config():
     import run_ffpp_tests
 
     assert set(run_ffpp_tests.CASES) == APPROVED_ABLATION_CONFIGS
+
+
+def test_ffpp_test_runner_case_option_restricts_to_selected_configs(
+    monkeypatch, capsys, tmp_path
+):
+    """``--case`` should skip every case not explicitly selected."""
+    import run_ffpp_tests
+
+    monkeypatch.setattr(run_ffpp_tests, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["run_ffpp_tests.py", "--case", "favit_lsda_rgb_srm.yaml"]
+    )
+
+    run_ffpp_tests.main()
+
+    output = capsys.readouterr().out
+    assert "favit_lsda_rgb_srm.yaml" in output
+    for other in run_ffpp_tests.CASES:
+        if other != "favit_lsda_rgb_srm.yaml":
+            assert other not in output
+
+
+def test_ffpp_test_runner_rejects_unknown_case():
+    import run_ffpp_tests
+
+    with pytest.raises(SystemExit):
+        run_ffpp_tests.build_parser().parse_args(["--case", "not_a_config.yaml"])

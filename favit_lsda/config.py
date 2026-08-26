@@ -34,6 +34,18 @@ def _boolean_toggle(model_config: dict[str, Any], field: str, default: bool) -> 
     return value
 
 
+#: Backbones vetted for the forensic branches. ``ProjectedForensicEncoder``
+#: works with any pooled timm classifier, but this allowlist keeps configs
+#: from silently drifting to an untested backbone; extend it deliberately
+#: after checking width/normalization/cost the way SRM/FFT were evaluated.
+SUPPORTED_SRM_BACKBONES = frozenset(
+    {"xception", "tf_efficientnet_b4", "tf_efficientnet_b4.ns_jft_in1k"}
+)
+SUPPORTED_FFT_BACKBONES = frozenset(
+    {"mobilenetv3_small_100", "tf_efficientnet_b4", "tf_efficientnet_b4.ns_jft_in1k"}
+)
+
+
 def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
     legacy = sorted(
         {"artifact_mode", "cnn_in_channels", "enable_rgb_cnn_branch"}
@@ -56,10 +68,16 @@ def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
             model_config, "forensic_pretrained", True
         ),
     )
-    if value.srm_backbone != "xception":
-        raise ValueError(f"unsupported srm_backbone: {value.srm_backbone!r}")
-    if value.fft_backbone != "mobilenetv3_small_100":
-        raise ValueError(f"unsupported fft_backbone: {value.fft_backbone!r}")
+    if value.srm_backbone not in SUPPORTED_SRM_BACKBONES:
+        raise ValueError(
+            f"unsupported srm_backbone: {value.srm_backbone!r}; "
+            f"supported: {sorted(SUPPORTED_SRM_BACKBONES)}"
+        )
+    if value.fft_backbone not in SUPPORTED_FFT_BACKBONES:
+        raise ValueError(
+            f"unsupported fft_backbone: {value.fft_backbone!r}; "
+            f"supported: {sorted(SUPPORTED_FFT_BACKBONES)}"
+        )
     return value
 
 

@@ -101,6 +101,70 @@ def test_encoder_rejects_nonfinite_or_nonfloating_inputs(monkeypatch, images):
         model(images)
 
 
+def test_encoder_is_identity_renorm_for_zero_five_mean_std_backbones(monkeypatch):
+    """xception's default_cfg is mean=std=0.5, matching the pipeline exactly."""
+    captured = {}
+
+    class RecordingBackbone(TinyBackbone):
+        def forward(self, images):
+            captured["images"] = images
+            return super().forward(images)
+
+    monkeypatch.setattr(
+        "favit_lsda.forensic.timm.create_model",
+        lambda *_args, **_kwargs: RecordingBackbone(),
+    )
+    model = ProjectedForensicEncoder("xception", 7, False, 0.0)
+    images = torch.randn(2, 3, 16, 16)
+
+    model(images)
+
+    torch.testing.assert_close(captured["images"], images)
+
+
+def test_encoder_renormalizes_for_imagenet_mean_std_backbones(monkeypatch):
+    """mobilenetv3_small_100 expects ImageNet stats, not the pipeline's 0.5/0.5."""
+    captured = {}
+
+    class RecordingBackbone(TinyBackbone):
+        pretrained_cfg = {
+            "mean": (0.485, 0.456, 0.406),
+            "std": (0.229, 0.224, 0.225),
+        }
+
+        def forward(self, images):
+            captured["images"] = images
+            return super().forward(images)
+
+    monkeypatch.setattr(
+        "favit_lsda.forensic.timm.create_model",
+        lambda *_args, **_kwargs: RecordingBackbone(),
+    )
+    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, False, 0.0)
+    images = torch.randn(2, 3, 16, 16)
+
+    model(images)
+
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    expected = ((images * 0.5 + 0.5) - mean) / std
+    torch.testing.assert_close(captured["images"], expected)
+
+
+@pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
+def test_encoder_projects_efficientnet_b4_output_width():
+    model = ProjectedForensicEncoder(
+        "tf_efficientnet_b4", 7, False, 0.0
+    ).eval()
+
+    with torch.no_grad():
+        output = model(torch.randn(1, 3, 32, 32))
+
+    assert output.shape == (1, 7)
+    assert torch.isfinite(output).all()
+    assert model.project[0].in_features == 1792
+
+
 def test_encoder_rejects_non_rank_two_backbone_output(monkeypatch):
     class UnpooledBackbone(TinyBackbone):
         def forward(self, images):
