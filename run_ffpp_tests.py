@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from favit_lsda.config import load_config
+
 CONFIGS_DIR = Path("configs")
 DEFAULT_MANIFEST = (
     r"E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed\manifests\ffpp_c23_test_frames.csv"
@@ -20,10 +22,10 @@ CASES = [
 
 
 def output_dir_of(config_path: Path) -> Path:
-    for line in config_path.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("output_dir:"):
-            return Path(line.split(":", 1)[1].strip())
-    raise ValueError(f"output_dir not found in {config_path}")
+    output_dir = load_config(config_path).get("output_dir")
+    if not output_dir:
+        raise ValueError(f"output_dir not found in {config_path}")
+    return Path(str(output_dir))
 
 
 def main() -> None:
