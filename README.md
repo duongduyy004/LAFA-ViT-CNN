@@ -205,13 +205,19 @@ phải là YAML boolean thực (`true`/`false`), không phải chuỗi. RGB CNN 
 obsolete field, cùng nhóm với `artifact_mode` và `cnn_in_channels`. Backbone
 names được kiểm tra qua allowlist (`SUPPORTED_SRM_BACKBONES`/
 `SUPPORTED_FFT_BACKBONES` trong `favit_lsda/config.py`): SRM nhận `xception`,
-`tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`; FFT nhận
-`mobilenetv3_small_100`, `tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`.
+`tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`; FFT chỉ nhận
+`mobilenetv3_small_100`. EfficientNet-B4 cố ý không nằm trong allowlist FFT: nó
+mới chỉ được đánh giá ở nhánh SRM, chưa có config hay số đo nào cho FFT.
 `ProjectedForensicEncoder` re-normalize input từ quy ước pipeline ([-1, 1],
 0.5/0.5) sang đúng mean/std pretrained của backbone (đọc từ
 `backbone.pretrained_cfg`/`default_cfg`), nên đổi backbone không kéo theo lệch
-chuẩn hoá. Xem `configs/favit_lsda_rgb_srm_effb4.yaml` cho ablation SRM =
-EfficientNet-B4 Noisy-Student so với baseline xception.
+chuẩn hoá. Re-normalize **chỉ chạy khi `forensic_pretrained: true`** — backbone
+random init không có phân phối input kỳ vọng để khớp, nên biến đổi thành
+identity. Với `xception` (mean=std=0.5) phép biến đổi cũng là identity; với
+`mobilenetv3_small_100` và `tf_efficientnet_b4` (ImageNet stats) thì không, nên
+mọi checkpoint FFT/B4 train trước thay đổi này phải train lại — xem mục
+checkpoint v6 bên dưới. Xem `configs/favit_lsda_rgb_srm_effb4.yaml` cho ablation
+SRM = EfficientNet-B4 Noisy-Student so với baseline xception.
 `forensic_pretrained: true` dùng ImageNet initialization; encoder forensic và
 projection được full-finetune. `model.pretrained: false` chỉ tắt pretrained
 FA-ViT; để chạy hoàn toàn offline, đặt thêm `forensic_pretrained: false`.
@@ -336,7 +342,7 @@ pip install -e ".[test]"
 python train.py --config configs/favit_lsda_rgb.yaml --device cuda:0
 ```
 
-Resume checkpoint v5:
+Resume checkpoint v6:
 
 ```powershell
 python train.py `
@@ -377,7 +383,7 @@ Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại b�
 Checkpoint multibranch lưu:
 
 ```text
-format_version: 5
+format_version: 6
 architecture: favit_lsda_multibranch
 enabled_branches: [rgb, srm?, fft?]
 srm_backbone / fft_backbone: tên backbone hoặc null
@@ -392,7 +398,10 @@ object tương ứng được xây.
 
 Checkpoint format v3/`favit_lsda_cnn` và v4 đều bị từ chối vì state/shape
 contract không tương thích — v4 có `late_fusion` rộng `3 * embed_dim`, trước
-khi RGB-CNN slot bắt buộc được thêm. Các từ legacy `artifact_mode`, `cnn_in_channels`,
+khi RGB-CNN slot bắt buộc được thêm. v5 bị từ chối vì lý do khác: shape vẫn
+khớp, nhưng forensic branch của v5 được train trên input pipeline thô, trước khi
+`ProjectedForensicEncoder` re-normalize sang mean/std của backbone pretrained;
+load nó sẽ cho metric sai một cách âm thầm thay vì báo lỗi. Các từ legacy `artifact_mode`, `cnn_in_channels`,
 `rgb_wavelet`, `srm_wavelet` và `FreqNet` chỉ còn được nhắc ở migration.
 Dùng `--init-favit` để nạp các FA-ViT tensor tương thích vào một run mới;
 detector head, RGB CNN branch, SRM/FFT encoders, projections và late fusion

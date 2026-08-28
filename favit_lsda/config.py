@@ -41,9 +41,10 @@ def _boolean_toggle(model_config: dict[str, Any], field: str, default: bool) -> 
 SUPPORTED_SRM_BACKBONES = frozenset(
     {"xception", "tf_efficientnet_b4", "tf_efficientnet_b4.ns_jft_in1k"}
 )
-SUPPORTED_FFT_BACKBONES = frozenset(
-    {"mobilenetv3_small_100", "tf_efficientnet_b4", "tf_efficientnet_b4.ns_jft_in1k"}
-)
+#: EfficientNet-B4 is deliberately absent here: it was evaluated as an SRM
+#: backbone (``configs/favit_lsda_rgb_srm_effb4.yaml``), never on the FFT
+#: branch, where a 19M-parameter backbone over a frequency map is untested.
+SUPPORTED_FFT_BACKBONES = frozenset({"mobilenetv3_small_100"})
 
 
 def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:

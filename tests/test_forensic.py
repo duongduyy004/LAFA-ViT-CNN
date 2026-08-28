@@ -1,8 +1,12 @@
 import pytest
+import timm
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-from favit_lsda.forensic import ProjectedForensicEncoder
+from favit_lsda.forensic import (
+    ProjectedForensicEncoder,
+    _backbone_normalization,
+)
 
 
 class TinyBackbone(torch.nn.Module):
@@ -101,54 +105,121 @@ def test_encoder_rejects_nonfinite_or_nonfloating_inputs(monkeypatch, images):
         model(images)
 
 
-def test_encoder_is_identity_renorm_for_zero_five_mean_std_backbones(monkeypatch):
-    """xception's default_cfg is mean=std=0.5, matching the pipeline exactly."""
+def _capture_backbone_input(model, images):
+    """Run the encoder and return the tensor its backbone actually received."""
     captured = {}
 
-    class RecordingBackbone(TinyBackbone):
-        def forward(self, images):
-            captured["images"] = images
-            return super().forward(images)
+    def hook(_module, args):
+        captured["images"] = args[0]
 
+    handle = model.backbone.register_forward_pre_hook(hook)
+    try:
+        with torch.no_grad():
+            model(images)
+    finally:
+        handle.remove()
+    return captured["images"]
+
+
+def _stub_backbone(monkeypatch, mean=None, std=None):
+    """Install a tiny backbone advertising the given pretrained stats."""
+
+    class StubBackbone(TinyBackbone):
+        pass
+
+    if mean is not None and std is not None:
+        StubBackbone.pretrained_cfg = {"mean": mean, "std": std}
     monkeypatch.setattr(
         "favit_lsda.forensic.timm.create_model",
-        lambda *_args, **_kwargs: RecordingBackbone(),
+        lambda *_args, **_kwargs: StubBackbone(),
     )
-    model = ProjectedForensicEncoder("xception", 7, False, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("name", "mean", "std"),
+    [
+        ("xception", (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        (
+            "mobilenetv3_small_100",
+            (0.485, 0.456, 0.406),
+            (0.229, 0.224, 0.225),
+        ),
+        (
+            "tf_efficientnet_b4",
+            (0.485, 0.456, 0.406),
+            (0.229, 0.224, 0.225),
+        ),
+    ],
+)
+@pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
+def test_real_backbone_normalization_stats_are_read_from_timm(name, mean, std):
+    """Pin the stats the renorm is derived from, per allowlisted backbone."""
+    backbone = timm.create_model(name, pretrained=False, num_classes=0)
+
+    assert _backbone_normalization(backbone) == (mean, std)
+
+
+def test_encoder_is_identity_renorm_for_zero_five_mean_std_backbones(monkeypatch):
+    """xception's stats equal the pipeline's, so its input passes through."""
+    _stub_backbone(monkeypatch, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    model = ProjectedForensicEncoder("xception", 7, True, 0.0)
     images = torch.randn(2, 3, 16, 16)
 
-    model(images)
-
-    torch.testing.assert_close(captured["images"], images)
+    torch.testing.assert_close(_capture_backbone_input(model, images), images)
 
 
 def test_encoder_renormalizes_for_imagenet_mean_std_backbones(monkeypatch):
     """mobilenetv3_small_100 expects ImageNet stats, not the pipeline's 0.5/0.5."""
-    captured = {}
-
-    class RecordingBackbone(TinyBackbone):
-        pretrained_cfg = {
-            "mean": (0.485, 0.456, 0.406),
-            "std": (0.229, 0.224, 0.225),
-        }
-
-        def forward(self, images):
-            captured["images"] = images
-            return super().forward(images)
-
-    monkeypatch.setattr(
-        "favit_lsda.forensic.timm.create_model",
-        lambda *_args, **_kwargs: RecordingBackbone(),
+    _stub_backbone(
+        monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
     )
-    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, False, 0.0)
+    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, True, 0.0)
     images = torch.randn(2, 3, 16, 16)
-
-    model(images)
 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     expected = ((images * 0.5 + 0.5) - mean) / std
-    torch.testing.assert_close(captured["images"], expected)
+    torch.testing.assert_close(_capture_backbone_input(model, images), expected)
+
+
+def test_encoder_falls_back_to_pipeline_stats_without_a_backbone_config(monkeypatch):
+    _stub_backbone(monkeypatch)
+    model = ProjectedForensicEncoder("xception", 7, True, 0.0)
+    images = torch.randn(2, 3, 16, 16)
+
+    torch.testing.assert_close(_capture_backbone_input(model, images), images)
+
+
+def test_encoder_skips_renorm_without_pretrained_weights(monkeypatch):
+    """Random init has no expected input distribution to re-normalize to."""
+    _stub_backbone(
+        monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
+    )
+    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, False, 0.0)
+    images = torch.randn(2, 3, 16, 16)
+
+    torch.testing.assert_close(_capture_backbone_input(model, images), images)
+
+
+@pytest.mark.parametrize("pretrained", [True, False])
+def test_renorm_buffers_stay_out_of_the_state_dict(monkeypatch, pretrained):
+    """They are derived from the backbone config, so they are not checkpointed."""
+    _stub_backbone(
+        monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
+    )
+    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, pretrained, 0.0)
+
+    assert not [key for key in model.state_dict() if "_renorm_" in key]
+    model.load_state_dict(model.state_dict(), strict=True)
+
+
+def test_encoder_ignores_non_positive_backbone_std(monkeypatch):
+    """A degenerate std must not produce inf/nan scaling."""
+    _stub_backbone(monkeypatch, mean=(0.5, 0.5, 0.5), std=(0.0, 0.5, 0.5))
+    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, True, 0.0)
+    images = torch.randn(2, 3, 16, 16)
+
+    torch.testing.assert_close(_capture_backbone_input(model, images), images)
 
 
 @pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")

@@ -58,7 +58,13 @@ def test_legacy_artifact_fields_are_rejected(key):
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("srm_backbone", "resnet50"), ("fft_backbone", "freqnet")],
+    [
+        ("srm_backbone", "resnet50"),
+        ("fft_backbone", "freqnet"),
+        # Vetted for SRM only; the FFT branch was never evaluated with it.
+        ("fft_backbone", "tf_efficientnet_b4"),
+        ("fft_backbone", "tf_efficientnet_b4.ns_jft_in1k"),
+    ],
 )
 def test_unsupported_backbones_are_rejected(field, value):
     with pytest.raises(ValueError, match=rf"{field}.*{value}"):

@@ -110,7 +110,7 @@ def test_checkpoint_rejects_legacy_architecture(tmp_path):
         )
 
 
-@pytest.mark.parametrize("version", [6, 2, None, "5"])
+@pytest.mark.parametrize("version", [7, 5, 2, None, "6"])
 def test_checkpoint_rejects_unsupported_format_version(tmp_path, version):
     """Catches a future on-disk format bump loading silently against old code."""
     from favit_lsda.checkpoints import validate_checkpoint_branches
@@ -165,7 +165,7 @@ def test_checkpoint_rejects_malformed_top_level_branch_metadata(tmp_path):
 def _tiny_checkpoint(model_config: dict, state: dict | None = None) -> dict:
     branches = resolve_branch_config(model_config)
     return {
-        "format_version": 5,
+        "format_version": 6,
         "architecture": "favit_lsda_multibranch",
         "enabled_branches": list(branches.enabled_branches),
         "srm_backbone": branches.srm_backbone if branches.enable_srm else None,
@@ -497,7 +497,7 @@ def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata
     assert len(captured) == 1
     model, _ = captured[0]
     best = torch.load(output_dir / "best.pt", weights_only=False)
-    assert best["format_version"] == 5
+    assert best["format_version"] == 6
     assert best["architecture"] == "favit_lsda_multibranch"
     assert best["enabled_branches"] == list(model.enabled_branches)
     assert best["srm_backbone"] == model.srm_backbone_name
@@ -506,13 +506,13 @@ def test_final_target_evaluation_runs_at_video_level_and_persists_model_metadata
     assert best["celebdf_test_metrics"]["level"] == "video"
 
 
-def test_checkpoint_metadata_is_version_five(tmp_path):
-    """The mandatory RGB CNN slot widened late_fusion, so v4 state cannot load."""
+def test_checkpoint_metadata_is_version_six(tmp_path):
+    """v5 forensic weights were trained before the pretrained-stats renorm."""
     from favit_lsda.checkpoints import model_branch_metadata
 
     model = build_model_from_config(TINY_MODEL_CONFIG, pretrained=False)
     metadata = model_branch_metadata(model)
-    assert metadata["format_version"] == 5
+    assert metadata["format_version"] == 6
     # The branch reads inputs['rgb'], so it must not widen the input contract.
     assert metadata["enabled_branches"] == ["rgb"]
 

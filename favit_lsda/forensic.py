@@ -38,7 +38,11 @@ def _backbone_normalization(backbone: nn.Module) -> tuple[tuple[float, ...], tup
     std = cfg.get("std") if hasattr(cfg, "get") else getattr(cfg, "std", None)
     if not mean or not std or len(mean) != 3 or len(std) != 3:
         return _PIPELINE_MEAN, _PIPELINE_STD
-    return tuple(float(value) for value in mean), tuple(float(value) for value in std)
+    mean = tuple(float(value) for value in mean)
+    std = tuple(float(value) for value in std)
+    if any(value <= 0.0 for value in std):
+        return _PIPELINE_MEAN, _PIPELINE_STD
+    return mean, std
 
 
 class ProjectedForensicEncoder(nn.Module):
@@ -70,13 +74,26 @@ class ProjectedForensicEncoder(nn.Module):
         # whatever mean/std this backbone was pretrained on, so a backbone
         # whose pretrained stats differ (e.g. ImageNet mean/std) isn't fed
         # mismatched inputs. x_backbone = x_pipeline * scale + shift.
-        mean, std = _backbone_normalization(self.backbone)
+        # Only meaningful with pretrained weights: a randomly initialized
+        # backbone has no expected input distribution, so the pipeline's own
+        # convention is kept and the re-normalization degenerates to identity.
+        mean, std = (
+            _backbone_normalization(self.backbone)
+            if pretrained
+            else (_PIPELINE_MEAN, _PIPELINE_STD)
+        )
         scale = tuple(_PIPELINE_STD[i] / std[i] for i in range(3))
         shift = tuple(
             (_PIPELINE_MEAN[i] - mean[i]) / std[i] for i in range(3)
         )
-        self.register_buffer("_renorm_scale", torch.tensor(scale).view(1, 3, 1, 1))
-        self.register_buffer("_renorm_shift", torch.tensor(shift).view(1, 3, 1, 1))
+        # Derived from the backbone's config, not learned: keeping them out of
+        # ``state_dict`` leaves the checkpoint contract unchanged.
+        self.register_buffer(
+            "_renorm_scale", torch.tensor(scale).view(1, 3, 1, 1), persistent=False
+        )
+        self.register_buffer(
+            "_renorm_shift", torch.tensor(shift).view(1, 3, 1, 1), persistent=False
+        )
 
     def forward(self, images: Tensor) -> Tensor:
         if images.ndim != 4 or images.shape[1] != 3:

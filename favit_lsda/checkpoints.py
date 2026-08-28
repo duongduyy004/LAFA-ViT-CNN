@@ -6,14 +6,19 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED_ARCHITECTURE = "favit_lsda_multibranch"
-SUPPORTED_FORMAT_VERSION = 5
+SUPPORTED_FORMAT_VERSION = 6
 #: On-disk formats this build can name but not read. Each predates a fixed-slot
 #: fusion width change, so their ``late_fusion`` tensors cannot be transplanted.
 LEGACY_FORMAT_VERSIONS = (3, 4)
+#: v5 tensors still have v6 shapes, but v5 forensic branches were trained on
+#: raw pipeline inputs, before ``ProjectedForensicEncoder`` re-normalized them
+#: to the pretrained backbone's mean/std. Loading one would evaluate weights
+#: under an input distribution they never saw, so v6 rejects it outright rather
+#: than reporting quietly wrong metrics.
 
 
 def model_branch_metadata(model) -> dict[str, Any]:
-    """Return the authoritative v5 branch metadata for a constructed model."""
+    """Return the authoritative v6 branch metadata for a constructed model."""
     return {
         "format_version": SUPPORTED_FORMAT_VERSION,
         "architecture": EXPECTED_ARCHITECTURE,
