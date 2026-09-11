@@ -15,7 +15,6 @@ APPROVED_ABLATION_CONFIGS = {
     "favit_lsda_rgb_srm.yaml",
     "favit_lsda_rgb_fft.yaml",
     "favit_lsda_rgb_srm_fft.yaml",
-    "favit_lsda_rgb_srm_effb4.yaml",
 }
 PRIMARY_CONFIG = Path("configs/favit_lsda_ffpp_c23_celebdf.yaml")
 
@@ -85,21 +84,10 @@ def test_experiment_config_has_exact_branches(name, srm, fft):
     validate_model_config(config["model"])
     assert config["model"]["enable_srm_branch"] is srm
     assert config["model"]["enable_fft_branch"] is fft
-    assert config["model"]["srm_backbone"] == "xception"
-    assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
-    assert config["model"]["forensic_pretrained"] is True
-    assert config["output_dir"] == f"outputs/favit_lsda_{name}"
-
-
-def test_srm_effb4_ablation_config_swaps_only_the_srm_backbone():
-    config = load_config(Path("configs") / "favit_lsda_rgb_srm_effb4.yaml")
-    validate_model_config(config["model"])
-    assert config["model"]["enable_srm_branch"] is True
-    assert config["model"]["enable_fft_branch"] is False
     assert config["model"]["srm_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
     assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
     assert config["model"]["forensic_pretrained"] is True
-    assert config["output_dir"] == "outputs/favit_lsda_rgb_srm_effb4"
+    assert config["output_dir"] == f"outputs/favit_lsda_{name}"
 
 
 def test_ablation_config_filenames_are_exact():
@@ -116,7 +104,7 @@ def test_primary_config_is_explicitly_rgb_only():
     validate_model_config(config["model"])
     assert config["model"]["enable_srm_branch"] is False
     assert config["model"]["enable_fft_branch"] is False
-    assert config["model"]["srm_backbone"] == "xception"
+    assert config["model"]["srm_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
     assert config["model"]["fft_backbone"] == "mobilenetv3_small_100"
     assert config["model"]["forensic_pretrained"] is True
 

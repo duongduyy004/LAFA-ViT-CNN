@@ -41,7 +41,7 @@ model:
   domain_adversarial_strength: 1.0
   enable_srm_branch: false
   enable_fft_branch: false
-  srm_backbone: xception
+  srm_backbone: tf_efficientnet_b4.ns_jft_in1k
   fft_backbone: mobilenetv3_small_100
   forensic_pretrained: true
 

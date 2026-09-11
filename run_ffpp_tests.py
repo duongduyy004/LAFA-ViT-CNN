@@ -18,7 +18,6 @@ CASES = [
     "favit_lsda_rgb_srm.yaml",
     "favit_lsda_rgb_fft.yaml",
     "favit_lsda_rgb_srm_fft.yaml",
-    "favit_lsda_rgb_srm_effb4.yaml",
 ]
 
 

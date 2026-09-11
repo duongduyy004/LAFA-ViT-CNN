@@ -193,7 +193,7 @@ FA-ViT, không phải reproduction nguyên xi detector LSDA gốc.
 ```yaml
 enable_srm_branch: false
 enable_fft_branch: false
-srm_backbone: xception
+srm_backbone: tf_efficientnet_b4.ns_jft_in1k
 fft_backbone: mobilenetv3_small_100
 forensic_pretrained: true
 ```
@@ -216,8 +216,8 @@ random init không có phân phối input kỳ vọng để khớp, nên biến 
 identity. Với `xception` (mean=std=0.5) phép biến đổi cũng là identity; với
 `mobilenetv3_small_100` và `tf_efficientnet_b4` (ImageNet stats) thì không, nên
 mọi checkpoint FFT/B4 train trước thay đổi này phải train lại — xem mục
-checkpoint v6 bên dưới. Xem `configs/favit_lsda_rgb_srm_effb4.yaml` cho ablation
-SRM = EfficientNet-B4 Noisy-Student so với baseline xception.
+checkpoint v6 bên dưới. Các config hiện dùng EfficientNet-B4 Noisy-Student cho
+nhánh SRM.
 `forensic_pretrained: true` dùng ImageNet initialization; encoder forensic và
 projection được full-finetune. `model.pretrained: false` chỉ tắt pretrained
 FA-ViT; để chạy hoàn toàn offline, đặt thêm `forensic_pretrained: false`.
@@ -371,10 +371,8 @@ python train.py --config configs/favit_lsda_rgb_fft.yaml
 python train.py --config configs/favit_lsda_rgb_srm_fft.yaml
 ```
 
-Một config thứ năm, `configs/favit_lsda_rgb_srm_effb4.yaml`, giữ nguyên toggle
-của `favit_lsda_rgb_srm.yaml` (SRM on, FFT off) nhưng đổi `srm_backbone` sang
-`tf_efficientnet_b4.ns_jft_in1k` — dùng để so sánh backbone SRM, không phải
-biến thí nghiệm SRM/FFT toggle.
+Tất cả config dùng `tf_efficientnet_b4.ns_jft_in1k` làm backbone SRM; bốn config
+ablation chỉ khác nhau ở các toggle SRM/FFT.
 
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
 
@@ -457,17 +455,16 @@ python run_ffpp_tests.py
 ```
 
 Dùng `--case CONFIG.yaml` (lặp lại được) để chỉ chạy một hoặc vài case thay vì
-cả năm — hữu ích khi chỉ một checkpoint sẵn sàng hoặc đang debug một case:
+cả bốn — hữu ích khi chỉ một checkpoint sẵn sàng hoặc đang debug một case:
 
 ```powershell
 python run_ffpp_tests.py --case favit_lsda_rgb.yaml
 python run_ffpp_tests.py --case favit_lsda_rgb_srm.yaml
 python run_ffpp_tests.py --case favit_lsda_rgb_fft.yaml
 python run_ffpp_tests.py --case favit_lsda_rgb_srm_fft.yaml
-python run_ffpp_tests.py --case favit_lsda_rgb_srm_effb4.yaml
 
 # nhiều case cùng lúc
-python run_ffpp_tests.py --case favit_lsda_rgb_srm.yaml --case favit_lsda_rgb_srm_effb4.yaml
+python run_ffpp_tests.py --case favit_lsda_rgb_srm.yaml --case favit_lsda_rgb_srm_fft.yaml
 ```
 
 Với mỗi case, script đọc `output_dir` từ config, dùng checkpoint
