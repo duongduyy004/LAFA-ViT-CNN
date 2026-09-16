@@ -127,7 +127,7 @@ group [real + 4 fake domains]
               │                                                           │
               ├─ srm ──► Xception ──► projection ──► SRM slot / zero ─────┤
               │                                                           │
-              └─ fft ──► MobileNetV3-Small ──► projection ─► FFT slot/zero│
+              └─ fft ──► EfficientNet-B0 ─────► projection ─► FFT slot/zero│
                                                                           ▼
                                                     fixed-slot concat + MLP
                                                                           │
@@ -170,7 +170,7 @@ group [real + 4 fake domains]
 7. **SRM/Xception:** khi bật, Xception nhận duy nhất tensor SRM ba kênh, global
    pool rồi projection `Linear -> LayerNorm -> GELU -> Dropout` về
    `embed_dim`. Toàn bộ backbone và projection được fine-tune.
-8. **FFT/MobileNetV3-Small:** khi bật, MobileNetV3-Small nhận duy nhất FFT
+8. **FFT/EfficientNet-B0:** khi bật, EfficientNet-B0 nhận duy nhất FFT
    log-magnitude ba kênh và dùng cùng projection contract. Toàn bộ branch được
    fine-tune.
 9. **Fixed-slot late fusion:** luôn concat theo thứ tự
@@ -194,7 +194,7 @@ FA-ViT, không phải reproduction nguyên xi detector LSDA gốc.
 enable_srm_branch: false
 enable_fft_branch: false
 srm_backbone: tf_efficientnet_b4.ns_jft_in1k
-fft_backbone: mobilenetv3_small_100
+fft_backbone: efficientnet_b0
 forensic_pretrained: true
 ```
 
@@ -206,15 +206,15 @@ obsolete field, cùng nhóm với `artifact_mode` và `cnn_in_channels`. Backbon
 names được kiểm tra qua allowlist (`SUPPORTED_SRM_BACKBONES`/
 `SUPPORTED_FFT_BACKBONES` trong `favit_lsda/config.py`): SRM nhận `xception`,
 `tf_efficientnet_b4`, `tf_efficientnet_b4.ns_jft_in1k`; FFT chỉ nhận
-`mobilenetv3_small_100`. EfficientNet-B4 cố ý không nằm trong allowlist FFT: nó
-mới chỉ được đánh giá ở nhánh SRM, chưa có config hay số đo nào cho FFT.
+`efficientnet_b0`. Các biến thể EfficientNet lớn hơn chưa nằm trong allowlist
+FFT vì chưa được đánh giá về tương quan chi phí/chất lượng trên frequency map.
 `ProjectedForensicEncoder` re-normalize input từ quy ước pipeline ([-1, 1],
 0.5/0.5) sang đúng mean/std pretrained của backbone (đọc từ
 `backbone.pretrained_cfg`/`default_cfg`), nên đổi backbone không kéo theo lệch
 chuẩn hoá. Re-normalize **chỉ chạy khi `forensic_pretrained: true`** — backbone
 random init không có phân phối input kỳ vọng để khớp, nên biến đổi thành
 identity. Với `xception` (mean=std=0.5) phép biến đổi cũng là identity; với
-`mobilenetv3_small_100` và `tf_efficientnet_b4` (ImageNet stats) thì không, nên
+`efficientnet_b0` và `tf_efficientnet_b4` (ImageNet stats) thì không, nên
 mọi checkpoint FFT/B4 train trước thay đổi này phải train lại — xem mục
 checkpoint v6 bên dưới. Các config hiện dùng EfficientNet-B4 Noisy-Student cho
 nhánh SRM.
@@ -235,7 +235,7 @@ frame RGB đã augment/normalize
         ├─ rgb ─► shared FA-ViT ───────► RGB slot ───────────────┐
         ├─ rgb ─► CNNFeatureBranch ────► RGB-CNN slot ───────────┤
         ├─ srm ─► Xception ────────────► SRM slot (nếu bật) ─────┤
-        └─ fft ─► MobileNetV3-Small ───► FFT slot (nếu bật) ─────┤
+        └─ fft ─► EfficientNet-B0 ─────► FFT slot (nếu bật) ─────┤
                                                                 ▼
                                                 fixed-slot late fusion
                                                                 │
@@ -371,8 +371,9 @@ python train.py --config configs/favit_lsda_rgb_fft.yaml
 python train.py --config configs/favit_lsda_rgb_srm_fft.yaml
 ```
 
-Tất cả config dùng `tf_efficientnet_b4.ns_jft_in1k` làm backbone SRM; bốn config
-ablation chỉ khác nhau ở các toggle SRM/FFT.
+Tất cả config dùng `tf_efficientnet_b4.ns_jft_in1k` làm backbone SRM và
+`efficientnet_b0` làm backbone FFT; bốn config ablation chỉ khác nhau ở các
+toggle SRM/FFT.
 
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
 

@@ -41,10 +41,10 @@ def _boolean_toggle(model_config: dict[str, Any], field: str, default: bool) -> 
 SUPPORTED_SRM_BACKBONES = frozenset(
     {"xception", "tf_efficientnet_b4", "tf_efficientnet_b4.ns_jft_in1k"}
 )
-#: EfficientNet-B4 is deliberately absent here: it is used as an SRM
-#: backbone by the shipped configs, never on the FFT
-#: branch, where a 19M-parameter backbone over a frequency map is untested.
-SUPPORTED_FFT_BACKBONES = frozenset({"mobilenetv3_small_100"})
+#: EfficientNet-B0 is the vetted backbone for the FFT branch. Larger
+#: EfficientNet variants remain excluded until their cost/quality trade-off
+#: has been evaluated on frequency maps.
+SUPPORTED_FFT_BACKBONES = frozenset({"efficientnet_b0"})
 
 
 def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
@@ -62,9 +62,7 @@ def resolve_branch_config(model_config: dict[str, Any]) -> BranchConfig:
         enable_srm=_boolean_toggle(model_config, "enable_srm_branch", False),
         enable_fft=_boolean_toggle(model_config, "enable_fft_branch", False),
         srm_backbone=str(model_config.get("srm_backbone", "xception")),
-        fft_backbone=str(
-            model_config.get("fft_backbone", "mobilenetv3_small_100")
-        ),
+        fft_backbone=str(model_config.get("fft_backbone", "efficientnet_b0")),
         forensic_pretrained=_boolean_toggle(
             model_config, "forensic_pretrained", True
         ),

@@ -16,7 +16,7 @@ class TinyBackbone(torch.nn.Module):
         return images.mean((-2, -1)).mean(1, keepdim=True).expand(-1, 5)
 
 
-@pytest.mark.parametrize("name", ["xception", "mobilenetv3_small_100"])
+@pytest.mark.parametrize("name", ["xception", "efficientnet_b0"])
 def test_encoder_builds_requested_pretrained_model(monkeypatch, name):
     calls = []
 
@@ -39,7 +39,7 @@ def test_encoder_builds_requested_pretrained_model(monkeypatch, name):
 
 @pytest.mark.parametrize(
     ("name", "expected_width"),
-    [("xception", 2048), ("mobilenetv3_small_100", 1024)],
+    [("xception", 2048), ("efficientnet_b0", 1280)],
 )
 @pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
 def test_encoder_projects_real_backbone_output_width(name, expected_width):
@@ -55,7 +55,7 @@ def test_encoder_projects_real_backbone_output_width(name, expected_width):
 
 @pytest.mark.parametrize(
     ("name", "expected_width"),
-    [("xception", 2048), ("mobilenetv3_small_100", 1024)],
+    [("xception", 2048), ("efficientnet_b0", 1280)],
 )
 @pytest.mark.filterwarnings("ignore:Mapping deprecated model name xception")
 def test_encoder_parameters_are_initialized_before_forward(name, expected_width):
@@ -140,7 +140,7 @@ def _stub_backbone(monkeypatch, mean=None, std=None):
     [
         ("xception", (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         (
-            "mobilenetv3_small_100",
+            "efficientnet_b0",
             (0.485, 0.456, 0.406),
             (0.229, 0.224, 0.225),
         ),
@@ -169,11 +169,11 @@ def test_encoder_is_identity_renorm_for_zero_five_mean_std_backbones(monkeypatch
 
 
 def test_encoder_renormalizes_for_imagenet_mean_std_backbones(monkeypatch):
-    """mobilenetv3_small_100 expects ImageNet stats, not the pipeline's 0.5/0.5."""
+    """efficientnet_b0 expects ImageNet stats, not the pipeline's 0.5/0.5."""
     _stub_backbone(
         monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
     )
-    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, True, 0.0)
+    model = ProjectedForensicEncoder("efficientnet_b0", 7, True, 0.0)
     images = torch.randn(2, 3, 16, 16)
 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -195,7 +195,7 @@ def test_encoder_skips_renorm_without_pretrained_weights(monkeypatch):
     _stub_backbone(
         monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
     )
-    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, False, 0.0)
+    model = ProjectedForensicEncoder("efficientnet_b0", 7, False, 0.0)
     images = torch.randn(2, 3, 16, 16)
 
     torch.testing.assert_close(_capture_backbone_input(model, images), images)
@@ -207,7 +207,7 @@ def test_renorm_buffers_stay_out_of_the_state_dict(monkeypatch, pretrained):
     _stub_backbone(
         monkeypatch, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
     )
-    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, pretrained, 0.0)
+    model = ProjectedForensicEncoder("efficientnet_b0", 7, pretrained, 0.0)
 
     assert not [key for key in model.state_dict() if "_renorm_" in key]
     model.load_state_dict(model.state_dict(), strict=True)
@@ -216,7 +216,7 @@ def test_renorm_buffers_stay_out_of_the_state_dict(monkeypatch, pretrained):
 def test_encoder_ignores_non_positive_backbone_std(monkeypatch):
     """A degenerate std must not produce inf/nan scaling."""
     _stub_backbone(monkeypatch, mean=(0.5, 0.5, 0.5), std=(0.0, 0.5, 0.5))
-    model = ProjectedForensicEncoder("mobilenetv3_small_100", 7, True, 0.0)
+    model = ProjectedForensicEncoder("efficientnet_b0", 7, True, 0.0)
     images = torch.randn(2, 3, 16, 16)
 
     torch.testing.assert_close(_capture_backbone_input(model, images), images)
