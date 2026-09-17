@@ -377,6 +377,65 @@ toggle SRM/FFT.
 
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
 
+## RGB baseline không dùng LSDA
+
+Pipeline baseline dùng lại face/frame loader và augmentation của repository,
+nhưng model chỉ nhận `inputs["rgb"]` và được tối ưu trực tiếp bằng binary
+cross-entropy. Không có group LSDA, latent transform, teacher, distillation,
+FAL, SRM, FFT hay late fusion.
+
+Năm backbone và config tương ứng:
+
+| Model | Config |
+| --- | --- |
+| EfficientNet-B4 | `configs/baselines/efficientnet_b4.yaml` |
+| ResNet-50 | `configs/baselines/resnet50.yaml` |
+| ViT-B/16 | `configs/baselines/vit_b16.yaml` |
+| Swin-T | `configs/baselines/swin_t.yaml` |
+| XceptionNet | `configs/baselines/xception.yaml` |
+
+Mỗi config thực hiện cùng một protocol:
+
+1. Flatten `ffpp_c23_train_pairs.csv` thành các frame real/fake độc lập; real
+   frame trùng lặp được loại bỏ và cross-entropy được cân bằng theo số mẫu.
+2. Fine-tune backbone pretrained trên FF++.
+3. Mỗi epoch đánh giá Celeb-DF ở **video level** (trung bình xác suất các frame
+   cùng `video_id`) và lưu `best.pt` theo Celeb-DF video AUC.
+4. Sau model selection, nạp lại `best.pt` và test một lần trên FF++ test ở
+   video level. Kết quả được ghi vào checkpoint và `history.jsonl`.
+
+Train từng model bằng Bash:
+
+```bash
+python train_baseline.py --config configs/baselines/efficientnet_b4.yaml --device cuda:0
+python train_baseline.py --config configs/baselines/resnet50.yaml --device cuda:0
+python train_baseline.py --config configs/baselines/vit_b16.yaml --device cuda:0
+python train_baseline.py --config configs/baselines/swin_t.yaml --device cuda:0
+python train_baseline.py --config configs/baselines/xception.yaml --device cuda:0
+```
+
+Test lại một checkpoint cụ thể trên FF++:
+
+```bash
+python evaluate_baseline.py \
+  --config configs/baselines/resnet50.yaml \
+  --checkpoint outputs/baselines/resnet50/best.pt \
+  --level video \
+  --device cuda:0
+```
+
+Test batch tất cả checkpoint hiện có (checkpoint chưa được train sẽ được bỏ
+qua), đồng thời ghi `ffpp_test_result_video.json` vào từng output directory:
+
+```bash
+python run_baseline_ffpp_tests.py --level video --device cuda:0
+```
+
+Các đường dẫn mặc định nằm trong năm file YAML. `train_manifest` chấp nhận cả
+manifest pair (`fake_path,real_path,method`) lẫn manifest frame
+(`path,label,video_id`). Hai manifest validation/test phải có
+`path,label,video_id` để aggregate metric theo video.
+
 ## Checkpoint và migration
 
 Checkpoint multibranch lưu:

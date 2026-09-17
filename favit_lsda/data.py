@@ -444,3 +444,82 @@ class FrameFaceDataset(Dataset[tuple[dict[str, Tensor], int, str]]):
             source,
         )
         return branch_inputs, int(row["label"]), row["video_id"]
+
+
+class BinaryFrameDataset(Dataset[tuple[dict[str, Tensor], int, str]]):
+    """Load independent binary frames for conventional (non-LSDA) training.
+
+    The input manifest may either be a regular frame manifest with
+    ``path,label,video_id`` columns, or the existing FF++ pair manifest with
+    ``fake_path,real_path,method`` columns. Pair manifests are flattened into
+    independent samples and duplicate real frames are removed.
+    """
+
+    FRAME_COLUMNS = {"path", "label", "video_id"}
+    PAIR_COLUMNS = {"fake_path", "real_path", "method"}
+
+    def __init__(
+        self, manifest: str | Path, data_root: str | Path, transform: FaceTransform
+    ) -> None:
+        rows = _read_manifest(manifest)
+        columns = rows[0].keys()
+        if self.FRAME_COLUMNS <= columns:
+            records = [
+                (row["path"], int(row["label"]), row["video_id"])
+                for row in rows
+            ]
+        elif self.PAIR_COLUMNS <= columns:
+            labels_by_path: dict[str, int] = {}
+            for row in rows:
+                for path, label in (
+                    (row["real_path"], 0),
+                    (row["fake_path"], 1),
+                ):
+                    previous = labels_by_path.setdefault(path, label)
+                    if previous != label:
+                        raise ValueError(
+                            f"training path has conflicting labels: {path}"
+                        )
+            records = [
+                (path, label, path) for path, label in labels_by_path.items()
+            ]
+        else:
+            raise ValueError(
+                "binary training manifest must contain either "
+                "path,label,video_id or fake_path,real_path,method columns"
+            )
+        labels = [label for _, label, _ in records]
+        if not labels or set(labels) != {0, 1}:
+            raise ValueError(
+                "binary training manifest must contain both real (0) and fake (1)"
+            )
+        if any(label not in (0, 1) for label in labels):
+            raise ValueError("binary training labels must be 0 or 1")
+        self.records = records
+        self.labels = tuple(labels)
+        self.data_root = Path(data_root)
+        self.transform = transform
+        self.expected_branches, self.expected_spatial_size = _transform_contract(
+            transform
+        )
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int) -> tuple[dict[str, Tensor], int, str]:
+        relative_path, label, video_id = self.records[index]
+        source = _resolve(self.data_root, relative_path)
+        with Image.open(source) as image:
+            branch_inputs = self.transform(
+                image.copy(),
+                flip=self.transform.sample_flip(),
+                crop=self.transform.sample_crop(),
+                sample_path=source,
+            )
+        branch_inputs = _validate_transform_output(
+            branch_inputs,
+            self.expected_branches,
+            self.expected_spatial_size,
+            source,
+        )
+        return branch_inputs, label, video_id

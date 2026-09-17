@@ -1,0 +1,40 @@
+seed: 42
+device: cuda
+output_dir: outputs/baselines/resnet50
+
+data:
+  root: 'E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed'
+  train_manifest: 'E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed\manifests\ffpp_c23_train_pairs.csv'
+  celebdf_validation_frames: 'E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed\manifests\celebdf_test_frames.csv'
+  ffpp_test_frames: 'E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed\manifests\ffpp_c23_test_frames.csv'
+  image_size: 224
+  num_workers: 4
+  train_augmentation:
+    horizontal_flip: 0.5
+    crop_scale_min: 0.9
+    color_jitter: 0.15
+    grayscale_probability: 0.1
+    blur_probability: 0.2
+    degradation_probability: 0.25
+    jpeg_probability: 0.3
+    jpeg_quality_min: 35
+
+model:
+  backbone: resnet50
+  pretrained: true
+  num_classes: 2
+
+train:
+  epochs: 20
+  batch_size: 32
+  eval_batch_size: 32
+  learning_rate: 0.00003
+  weight_decay: 0.05
+  warmup_epochs: 2
+  min_lr_ratio: 0.05
+  label_smoothing: 0.05
+  class_balanced_loss: true
+  max_grad_norm: 1.0
+  early_stopping_patience: 6
+  amp: true
+  resume: null
