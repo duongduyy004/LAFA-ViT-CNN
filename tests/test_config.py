@@ -23,7 +23,7 @@ def test_branch_config_defaults_to_rgb_only():
     value = resolve_branch_config({})
     assert value.enabled_branches == ("rgb",)
     assert value.srm_backbone == "xception"
-    assert value.fft_backbone == "efficientnet_b0"
+    assert value.fft_backbone == "tf_efficientnet_b4.ns_jft_in1k"
     assert value.forensic_pretrained is True
 
 
@@ -61,9 +61,8 @@ def test_legacy_artifact_fields_are_rejected(key):
         ("srm_backbone", "resnet50"),
         ("fft_backbone", "freqnet"),
         ("fft_backbone", "mobilenetv3_small_100"),
-        # Vetted for SRM only; the FFT branch was never evaluated with it.
+        # Only the pretrained B4 variant used by the configs is supported.
         ("fft_backbone", "tf_efficientnet_b4"),
-        ("fft_backbone", "tf_efficientnet_b4.ns_jft_in1k"),
     ],
 )
 def test_unsupported_backbones_are_rejected(field, value):
@@ -86,7 +85,7 @@ def test_experiment_config_has_exact_branches(name, srm, fft):
     assert config["model"]["enable_srm_branch"] is srm
     assert config["model"]["enable_fft_branch"] is fft
     assert config["model"]["srm_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
-    assert config["model"]["fft_backbone"] == "efficientnet_b0"
+    assert config["model"]["fft_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
     assert config["model"]["forensic_pretrained"] is True
     assert config["output_dir"] == f"outputs/favit_lsda_{name}"
 
@@ -106,7 +105,7 @@ def test_primary_config_is_explicitly_rgb_only():
     assert config["model"]["enable_srm_branch"] is False
     assert config["model"]["enable_fft_branch"] is False
     assert config["model"]["srm_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
-    assert config["model"]["fft_backbone"] == "efficientnet_b0"
+    assert config["model"]["fft_backbone"] == "tf_efficientnet_b4.ns_jft_in1k"
     assert config["model"]["forensic_pretrained"] is True
 
 

@@ -42,7 +42,7 @@ model:
   enable_srm_branch: false
   enable_fft_branch: true
   srm_backbone: tf_efficientnet_b4.ns_jft_in1k
-  fft_backbone: efficientnet_b0
+  fft_backbone: tf_efficientnet_b4.ns_jft_in1k
   forensic_pretrained: true
 
 loss:

@@ -288,7 +288,7 @@ class ForgeryAwareLSDAViT(nn.Module):
         enable_srm_branch: bool = False,
         enable_fft_branch: bool = False,
         srm_backbone: str = "xception",
-        fft_backbone: str = "efficientnet_b0",
+        fft_backbone: str = "tf_efficientnet_b4.ns_jft_in1k",
         forensic_pretrained: bool = True,
     ) -> None:
         super().__init__()
@@ -660,7 +660,7 @@ def create_favit_lsda(
     enable_srm_branch: bool = False,
     enable_fft_branch: bool = False,
     srm_backbone: str = "xception",
-    fft_backbone: str = "efficientnet_b0",
+    fft_backbone: str = "tf_efficientnet_b4.ns_jft_in1k",
     forensic_pretrained: bool = True,
 ) -> ForgeryAwareLSDAViT:
     backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
