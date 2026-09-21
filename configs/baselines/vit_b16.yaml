@@ -1,6 +1,6 @@
 seed: 42
 device: cuda
-output_dir: outputs/baselines/vit_b16
+output_dir: outputs/baselines/rgb_srm_fft/vit_b16
 
 data:
   root: 'E:\Deepfake_Data_Chien\ffpp_celebdf_data\processed'
@@ -23,6 +23,9 @@ model:
   backbone: vit_base_patch16_224.augreg_in21k
   pretrained: true
   num_classes: 2
+  branches: [rgb, srm, fft]
+  backbone_sharing: independent
+  fusion: concat
 
 train:
   epochs: 20

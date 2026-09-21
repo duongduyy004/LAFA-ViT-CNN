@@ -377,12 +377,20 @@ toggle SRM/FFT.
 
 Cấu hình Wavelet và sáu tên config ArtifactCNN legacy đã bị loại bỏ.
 
-## RGB baseline không dùng LSDA
+## Baseline RGB + SRM + FFT không dùng LSDA
 
 Pipeline baseline dùng lại face/frame loader và augmentation của repository,
-nhưng model chỉ nhận `inputs["rgb"]` và được tối ưu trực tiếp bằng binary
-cross-entropy. Không có group LSDA, latent transform, teacher, distillation,
-FAL, SRM, FFT hay late fusion.
+sinh đủ ba input `rgb`, `srm`, `fft` cho mỗi frame. Mỗi nhánh đi qua một
+backbone độc lập nhưng cùng kiến trúc được chọn bởi `model.backbone`. Ba feature
+sau global pooling được concat cố định theo thứ tự `[RGB, SRM, FFT]`, rồi đi qua
+linear binary head và được tối ưu trực tiếp bằng cross-entropy. Baseline không
+có group LSDA, latent transform, teacher, distillation hay FAL.
+
+```text
+rgb ─► backbone RGB ─┐
+srm ─► backbone SRM ─┼─► concat ─► binary head
+fft ─► backbone FFT ─┘
+```
 
 Năm backbone và config tương ứng:
 
@@ -398,7 +406,7 @@ Mỗi config thực hiện cùng một protocol:
 
 1. Flatten `ffpp_c23_train_pairs.csv` thành các frame real/fake độc lập; real
    frame trùng lặp được loại bỏ và cross-entropy được cân bằng theo số mẫu.
-2. Fine-tune backbone pretrained trên FF++.
+2. Fine-tune ba backbone pretrained cùng kiến trúc trên FF++.
 3. Mỗi epoch đánh giá Celeb-DF ở **video level** (trung bình xác suất các frame
    cùng `video_id`) và lưu `best.pt` theo Celeb-DF video AUC.
 4. Sau model selection, nạp lại `best.pt` và test một lần trên FF++ test ở
@@ -419,7 +427,7 @@ Test lại một checkpoint cụ thể trên FF++:
 ```bash
 python evaluate_baseline.py \
   --config configs/baselines/resnet50.yaml \
-  --checkpoint outputs/baselines/resnet50/best.pt \
+  --checkpoint outputs/baselines/rgb_srm_fft/resnet50/best.pt \
   --level video \
   --device cuda:0
 ```
@@ -435,6 +443,11 @@ Các đường dẫn mặc định nằm trong năm file YAML. `train_manifest` 
 manifest pair (`fake_path,real_path,method`) lẫn manifest frame
 (`path,label,video_id`). Hai manifest validation/test phải có
 `path,label,video_id` để aggregate metric theo video.
+
+Checkpoint baseline ba nhánh dùng `format_version: 2`, architecture
+`rgb_srm_fft_timm_concat_baseline`, `enabled_branches: [rgb, srm, fft]`,
+`backbone_sharing: independent` và `fusion: concat`. Checkpoint RGB-only v1
+không tương thích và không thể dùng để resume/evaluate kiến trúc mới.
 
 ## Checkpoint và migration
 

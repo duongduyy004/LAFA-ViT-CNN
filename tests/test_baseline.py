@@ -12,9 +12,12 @@ from torch.utils.data import DataLoader
 
 from favit_lsda.baseline import (
     BASELINE_ARCHITECTURE,
+    BASELINE_BACKBONE_SHARING,
+    BASELINE_BRANCHES,
     BASELINE_FORMAT_VERSION,
+    BASELINE_FUSION,
     SUPPORTED_BASELINE_BACKBONES,
-    TimmBinaryClassifier,
+    TimmThreeBranchClassifier,
     baseline_checkpoint_metadata,
     validate_baseline_checkpoint,
 )
@@ -32,20 +35,20 @@ CONFIG_BACKBONES = {
 }
 
 
-class _TinyClassifier(nn.Module):
+class _TinyEncoder(nn.Module):
     pretrained_cfg = {
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
     }
+    num_features = 3
 
     def __init__(self):
         super().__init__()
-        self.head = nn.Linear(3, 2)
         self.observed = None
 
     def forward(self, images):
         self.observed = images.detach().clone()
-        return self.head(images.mean(dim=(-2, -1)))
+        return images.mean(dim=(-2, -1))
 
 
 def test_baseline_configs_cover_exact_requested_timm_models():
@@ -55,34 +58,58 @@ def test_baseline_configs_cover_exact_requested_timm_models():
         observed[name] = config["model"]["backbone"]
         assert observed[name] == expected_backbone
         assert timm.is_model(expected_backbone)
+        assert tuple(config["model"]["branches"]) == BASELINE_BRANCHES
+        assert config["model"]["backbone_sharing"] == BASELINE_BACKBONE_SHARING
+        assert config["model"]["fusion"] == BASELINE_FUSION
         assert config["data"]["celebdf_validation_frames"]
         assert config["data"]["ffpp_test_frames"]
     assert set(observed.values()) == SUPPORTED_BASELINE_BACKBONES
 
 
-def test_baseline_renormalizes_pipeline_rgb_for_timm(monkeypatch):
-    tiny = _TinyClassifier()
+def test_baseline_encodes_and_concatenates_three_renormalized_branches(monkeypatch):
+    encoders = []
     calls = []
 
     def fake_create(name, **kwargs):
         calls.append((name, kwargs))
-        return tiny
+        encoder = _TinyEncoder()
+        encoders.append(encoder)
+        return encoder
 
     monkeypatch.setattr("favit_lsda.baseline.timm.create_model", fake_create)
-    model = TimmBinaryClassifier("resnet50", pretrained=False)
+    model = TimmThreeBranchClassifier("resnet50", pretrained=False)
     images = torch.zeros(2, 3, 8, 8)
-    logits = model({"rgb": images})
+    logits = model({"rgb": images, "srm": images + 0.25, "fft": images + 0.5})
 
-    expected = torch.tensor(
+    expected_rgb = torch.tensor(
         [
             (0.5 - 0.485) / 0.229,
             (0.5 - 0.456) / 0.224,
             (0.5 - 0.406) / 0.225,
         ]
     ).view(1, 3, 1, 1).expand_as(images)
-    torch.testing.assert_close(tiny.observed, expected)
+    scale = model._renorm_scale.expand_as(images)
+    torch.testing.assert_close(encoders[0].observed, expected_rgb)
+    torch.testing.assert_close(encoders[1].observed, expected_rgb + 0.25 * scale)
+    torch.testing.assert_close(encoders[2].observed, expected_rgb + 0.5 * scale)
+    assert model.head.in_features == 9
     assert logits.shape == (2, 2)
-    assert calls == [("resnet50", {"pretrained": False, "num_classes": 2})]
+    assert calls == [
+        (
+            "resnet50",
+            {"pretrained": False, "num_classes": 0, "global_pool": "avg"},
+        )
+    ] * 3
+
+
+def test_baseline_rejects_missing_forensic_branch(monkeypatch):
+    monkeypatch.setattr(
+        "favit_lsda.baseline.timm.create_model",
+        lambda *_args, **_kwargs: _TinyEncoder(),
+    )
+    model = TimmThreeBranchClassifier("resnet50", pretrained=False)
+    with pytest.raises(ValueError, match="expects branches"):
+        model({"rgb": torch.zeros(1, 3, 8, 8)})
 
 
 def _write_pair_manifest(root: Path) -> Path:
@@ -160,15 +187,18 @@ def test_baseline_train_loop_is_plain_binary_cross_entropy(tmp_path):
 def test_baseline_checkpoint_rejects_a_different_backbone(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "favit_lsda.baseline.timm.create_model",
-        lambda *_args, **_kwargs: _TinyClassifier(),
+        lambda *_args, **_kwargs: _TinyEncoder(),
     )
-    model = TimmBinaryClassifier("resnet50", pretrained=False)
+    model = TimmThreeBranchClassifier("resnet50", pretrained=False)
     checkpoint = {
         **baseline_checkpoint_metadata(model),
         "model": model.state_dict(),
     }
     assert checkpoint["architecture"] == BASELINE_ARCHITECTURE
     assert checkpoint["format_version"] == BASELINE_FORMAT_VERSION
+    assert checkpoint["enabled_branches"] == list(BASELINE_BRANCHES)
+    assert checkpoint["backbone_sharing"] == BASELINE_BACKBONE_SHARING
+    assert checkpoint["fusion"] == BASELINE_FUSION
     with pytest.raises(ValueError, match="checkpoint/config mismatch"):
         validate_baseline_checkpoint(
             checkpoint,

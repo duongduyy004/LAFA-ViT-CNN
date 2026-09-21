@@ -1,4 +1,4 @@
-"""Training loop for conventional RGB-only binary classifiers."""
+"""Training loop for conventional three-branch binary classifiers."""
 
 from __future__ import annotations
 

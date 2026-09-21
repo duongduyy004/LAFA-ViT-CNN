@@ -21,7 +21,7 @@ CONFIG_DIR = Path("configs/baselines")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Test all RGB baseline best checkpoints on FF++"
+        description="Test all RGB/SRM/FFT baseline best checkpoints on FF++"
     )
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument("--device", default=None)

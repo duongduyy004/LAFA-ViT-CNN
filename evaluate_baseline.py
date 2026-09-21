@@ -7,7 +7,11 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from favit_lsda.baseline import build_baseline_model, validate_baseline_checkpoint
+from favit_lsda.baseline import (
+    BASELINE_BRANCHES,
+    build_baseline_model,
+    validate_baseline_checkpoint,
+)
 from favit_lsda.config import load_config, resolve_device
 from favit_lsda.data import FaceTransform, FrameFaceDataset
 from favit_lsda.engine import evaluate_at_level
@@ -15,7 +19,7 @@ from favit_lsda.engine import evaluate_at_level
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate an RGB timm baseline on an FF++ frame manifest"
+        description="Evaluate an RGB/SRM/FFT timm baseline on an FF++ frame manifest"
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=None)
@@ -49,7 +53,11 @@ def main() -> None:
     dataset = FrameFaceDataset(
         manifest,
         data_config["root"],
-        FaceTransform(int(data_config.get("image_size", 224))),
+        FaceTransform(
+            int(data_config.get("image_size", 224)),
+            enable_srm="srm" in BASELINE_BRANCHES,
+            enable_fft="fft" in BASELINE_BRANCHES,
+        ),
     )
     loader = DataLoader(
         dataset,
@@ -73,6 +81,8 @@ def main() -> None:
     result = {
         "dataset": "FaceForensics++",
         "backbone": config["model"]["backbone"],
+        "enabled_branches": list(BASELINE_BRANCHES),
+        "fusion": model.fusion_name,
         "checkpoint": str(checkpoint_path),
         "manifest": str(manifest),
         **metrics,

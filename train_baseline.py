@@ -13,6 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from favit_lsda.baseline import (
+    BASELINE_BRANCHES,
     baseline_checkpoint_metadata,
     build_baseline_model,
     validate_baseline_checkpoint,
@@ -26,7 +27,7 @@ from favit_lsda.engine import evaluate_at_level
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train a conventional RGB-only timm baseline on FF++"
+        description="Train an RGB/SRM/FFT timm baseline on FF++"
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--resume", type=Path, default=None)
@@ -99,7 +100,11 @@ def _make_eval_loader(
     dataset = FrameFaceDataset(
         manifest,
         data_config["root"],
-        FaceTransform(int(data_config.get("image_size", 224))),
+        FaceTransform(
+            int(data_config.get("image_size", 224)),
+            enable_srm="srm" in BASELINE_BRANCHES,
+            enable_fft="fft" in BASELINE_BRANCHES,
+        ),
     )
     return DataLoader(
         dataset,
@@ -158,6 +163,8 @@ def main() -> None:
         ),
         jpeg_probability=float(augmentation.get("jpeg_probability", 0.0)),
         jpeg_quality_min=int(augmentation.get("jpeg_quality_min", 40)),
+        enable_srm="srm" in BASELINE_BRANCHES,
+        enable_fft="fft" in BASELINE_BRANCHES,
     )
     train_dataset = BinaryFrameDataset(
         data_config["train_manifest"], data_config["root"], train_transform
